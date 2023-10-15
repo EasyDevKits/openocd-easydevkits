@@ -109,6 +109,7 @@
 #define CH347_MAX_SEND_CMD				0X20 // max send cmd number
 #define CH347_MAX_SEND_BUF				0X200
 #define CH347_MAX_RECV_BUF				0X200
+#define CH347_MAX_CMD_BUF				128
 #define BUILD_UINT16(lo_byte, hi_byte)	((uint16_t)(((lo_byte) & 0x00FF) + (((hi_byte) & 0x00FF) << 8)))
 
 #define CH347_EPOUT						0x06u // the usb endpoint number for writing
@@ -168,7 +169,7 @@ struct ch347_swd_context {
 	uint8_t sent_cmd_count;
 	struct list_head send_cmd_head;
 	struct list_head free_cmd_head;
-	uint8_t *ch347_cmd_buf;
+	struct ch347_swd_io ch347_cmd_buf[CH347_MAX_CMD_BUF];
 };
 
 static struct ch347_swd_context ch347_swd_context;
@@ -1591,7 +1592,7 @@ static const struct command_registration ch347_command_handlers[] = {
 /**
  * @brief Initialization for the swd mode
  *
- * @return ERROR_OK at success; ERROR_FAIL otherwise
+ * @return Always ERROR_OK
  */
 static int ch347_swd_init(void)
 {
@@ -1608,16 +1609,12 @@ static int ch347_swd_init(void)
 	ch347_swd_context.send_len = CH347_CMD_HEADER;
 	//  0XE8 + 2byte len + N byte ack + data
 	ch347_swd_context.need_recv_len = CH347_CMD_HEADER;
-	ch347_swd_context.ch347_cmd_buf = malloc(128 * sizeof(struct ch347_swd_io));
-	if (ch347_swd_context.ch347_cmd_buf) {
-		pswd_io = (struct ch347_swd_io *)ch347_swd_context.ch347_cmd_buf;
-		for (int i = 0; i < 128; i++, pswd_io++) {
-			INIT_LIST_HEAD(&pswd_io->list_entry);
-			list_add_tail(&pswd_io->list_entry,
-					  &ch347_swd_context.free_cmd_head);
-		}
+	pswd_io = ch347_swd_context.ch347_cmd_buf;
+	for (int i = 0; i < CH347_MAX_CMD_BUF; i++, pswd_io++) {
+		INIT_LIST_HEAD(&pswd_io->list_entry);
+		list_add_tail(&pswd_io->list_entry,	&ch347_swd_context.free_cmd_head);
 	}
-	return ch347_swd_context.ch347_cmd_buf ? ERROR_OK : ERROR_FAIL;
+	return ERROR_OK;
 }
 
 static struct ch347_swd_io *ch347_get_one_swd_io(void)
