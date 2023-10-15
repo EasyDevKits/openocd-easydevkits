@@ -1,7 +1,6 @@
 # Welcome to OpenOCD!
 
-OpenOCD provides on-chip programming and debugging support with a
-layered architecture of JTAG interface and TAP support including:
+# Welcome to OpenOCD for EasyDevKits!
 
 - (X)SVF playback to facilitate automated boundary scan and FPGA/CPLD
   programming;
@@ -16,13 +15,10 @@ telnet, Tcl, and GDB. The GDB server enables OpenOCD to function as a
 the GNU GDB program (and the others who talk GDB protocol, e.g. IDA
 Pro).
 
-This README file contains an overview of the following topics:
+The EasyDevKits project integrates a target chip (in this case an ESP32) with a JTAG adapter chip on a single development board.
+For an introduction you can visit [EasyDevKits](https://www.easydevkits.com/) or watch the introduction video on [Youtube](https://www.youtube.com/watch?v=Hq00uXbZy-M)
 
-- quickstart instructions,
-- how to find and build more OpenOCD documentation,
-- list of the supported hardware,
-- the installation and build process,
-- packaging tips.
+# OpenOCD Documentation
 
 
 # Quickstart for the impatient
