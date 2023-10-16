@@ -76,9 +76,6 @@
 												pin numbers are for CH347T */
 #define VENDOR_VERSION					0x5F // for getting the chip version
 
-#define KHZ(n)							((n) * UINT64_C(1000))
-#define MHZ(n)							((n) * UINT64_C(1000000))
-#define GHZ(n)							((n) * UINT64_C(1000000000))
 
 #define HW_TDO_BUF_SIZE					4096
 #define SF_PACKET_BUF_SIZE				51200 // Command packet length
@@ -89,7 +86,6 @@
 #define CH347_CMD_HEADER				3     // Protocol header length
 #define MAX_BITS_PER_BIT_OP				248   /* No more bits are allowed per CH347_CMD_JTAG_BIT_OP
 												 command; this should be dividable by 8 */
-#define CH347_GPIO_CMD_LENGTH			(CH347_CMD_HEADER + GPIO_CNT) // fixed length of the GPIO control command
 
 // Protocol transmission format: CMD (1 byte)+Length (2 bytes)+Data
 #define CH347_CMD_INFO_RD				0xCA /* Parameter acquisition, used to obtain firmware version,
@@ -110,7 +106,6 @@
 #define CH347_MAX_SEND_BUF				0X200
 #define CH347_MAX_RECV_BUF				0X200
 #define CH347_MAX_CMD_BUF				128
-#define BUILD_UINT16(lo_byte, hi_byte)	((uint16_t)(((lo_byte) & 0x00FF) + (((hi_byte) & 0x00FF) << 8)))
 
 #define CH347_EPOUT						0x06u // the usb endpoint number for writing
 #define CH347_EPIN						0x86u // the usb endpoint number for reading
@@ -144,8 +139,8 @@ struct ch347_info {
 	uint8_t last_cmd;
 
 	uint8_t read_buffer[SF_PACKET_BUF_SIZE];
-	uint32_t read_idx;
-	uint32_t read_count;
+	int read_idx;
+	int read_count;
 	struct bit_copy_queue read_queue;
 	enum pack_size pack_size;
 	write_read_fn write_read_fn;
@@ -162,11 +157,11 @@ struct ch347_swd_io {
 struct ch347_swd_context {
 	uint8_t send_buf[CH347_MAX_SEND_BUF];
 	uint8_t recv_buf[CH347_MAX_RECV_BUF];
-	uint32_t send_len;
-	uint32_t recv_len;
-	uint32_t need_recv_len;
+	int send_len;
+	int recv_len;
+	int need_recv_len;
 	int queued_retval;
-	uint8_t sent_cmd_count;
+	int sent_cmd_count;
 	struct list_head send_cmd_head;
 	struct list_head free_cmd_head;
 	struct ch347_swd_io ch347_cmd_buf[CH347_MAX_CMD_BUF];
@@ -177,6 +172,18 @@ static bool swd_mode;
 static bool dev_is_opened; // Whether the device is turned on
 static uint16_t ch347_vids[] = {DEFAULT_VENDOR_ID, 0};
 static uint16_t ch347_pids[] = {DEFAULT_PRODUCT_ID, 0};
+// these are the 8 possible speeds; values in Hertz
+static const int ch347_clock_speeds[] = {
+	468750,
+	937500,
+	1875000,
+	3750000,
+	7500000,
+	15000000,
+	30000000,
+	60000000,
+	INT_MAX
+};
 static char *ch347_device_desc;
 static uint8_t ch347_activity_led_gpio_pin = 0xFF;
 static bool ch347_activity_led_active_high;
@@ -196,7 +203,7 @@ static int ch347_swd_run_queue(void);
 static bool ch347_open_device(void)
 {
 	if (jtag_libusb_open(ch347_vids, ch347_pids, ch347_device_desc, &ch347_handle, NULL) != ERROR_OK) {
-		LOG_ERROR("ch347 not found: vid=%04x, pid=%04x",  ch347_vids[0], ch347_pids[0]);
+		LOG_ERROR("CH347 not found: vid=%04x, pid=%04x",  ch347_vids[0], ch347_pids[0]);
 		return false;
 	}
 
@@ -205,7 +212,7 @@ static bool ch347_open_device(void)
 
 	int err_code = libusb_claim_interface(ch347_handle, CH347_MPHSI_INTERFACE);
 	if (err_code != ERROR_OK) {
-		LOG_ERROR("ch347 unable to claim interface: %s", libusb_error_name(err_code));
+		LOG_ERROR("CH347 unable to claim interface: %s", libusb_error_name(err_code));
 		return false;
 	}
 
@@ -214,7 +221,7 @@ static bool ch347_open_device(void)
 				LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
 				VENDOR_VERSION, 0, 0, &firmware_version, sizeof(firmware_version),
 				USB_WRITE_TIMEOUT, NULL) != ERROR_OK) {
-		LOG_ERROR("ch347 unable to get firmware version");
+		LOG_ERROR("CH347 unable to get firmware version");
 		return false;
 	}
 
@@ -243,7 +250,7 @@ static bool ch347_open_device(void)
 		firmware_version);
 
 	if (ch347_device_descriptor.bcdDevice < BYTEWISE_MODE_VERSION) {
-		LOG_INFO("ch347 old version of the chip, JTAG only working in bitwise mode. For bytewise mode at least version %X.%2X is needed.",
+		LOG_INFO("CH347 old version of the chip, JTAG only working in bitwise mode. For bytewise mode at least version %X.%2X is needed.",
 			(BYTEWISE_MODE_VERSION >> 8) & 0xFF,
 			BYTEWISE_MODE_VERSION & 0xFF);
 		ch347.write_read_fn = ch347_write_read_bitwise;
@@ -260,16 +267,12 @@ static bool ch347_open_device(void)
  * @param length Data length in and out
  * @return true at success
  */
-static bool ch347_write_data(uint8_t *data, uint64_t *length)
+static bool ch347_write_data(uint8_t *data, int *length)
 {
-	int ret, tmp = 0;
-	ret = jtag_libusb_bulk_write(ch347_handle, CH347_EPOUT, (char *)data, *length, USB_WRITE_TIMEOUT, &tmp);
+	int tmp = 0;
+	int ret = jtag_libusb_bulk_write(ch347_handle, CH347_EPOUT, (char *)data, *length, USB_WRITE_TIMEOUT, &tmp);
 	*length = tmp;
-
-	if (!ret)
-		return true;
-	else
-		return false;
+	return ret == ERROR_OK;
 }
 
 /**
@@ -279,24 +282,19 @@ static bool ch347_write_data(uint8_t *data, uint64_t *length)
  * @param length Data length in and out
  * @return true at success
  */
-static bool ch347_read_data(uint8_t *data, uint64_t *length)
+static bool ch347_read_data(uint8_t *data, int *length)
 {
-	int ret, tmp = 0;
-
+	int tmp = 0;
 	int size = *length;
-	ret = jtag_libusb_bulk_read(ch347_handle, CH347_EPIN, (char *)data, size, USB_READ_TIMEOUT, &tmp);
-
+	int ret = jtag_libusb_bulk_read(ch347_handle, CH347_EPIN, (char *)data, size, USB_READ_TIMEOUT, &tmp);
 	*length = tmp;
-	if (!ret)
-		return true;
-	else
-		return false;
+	return ret == ERROR_OK;
 }
 
 /**
  * @brief closes the CH347 device via libusb driver
  *
- * @return true at success
+ * @return Always true
  */
 static bool ch347_close_device(void)
 {
@@ -313,49 +311,28 @@ static bool ch347_close_device(void)
 static bool ch347_swd_init_cmd(uint8_t clock_index)
 {
 	uint8_t cmd_buf[128] = "";
-	unsigned long i = 0;
+	int i = 0;
 	cmd_buf[i++] = CH347_CMD_SWD_INIT;
 	cmd_buf[i++] = 8;
 	cmd_buf[i++] = 0;
 	cmd_buf[i++] = 0x40;
 	cmd_buf[i++] = 0x42;
-
 	cmd_buf[i++] = 0x0f; // Reserved bytes
 	cmd_buf[i++] = 0x00; // Reserved bytes
 	cmd_buf[i++] = clock_index; // JTAG clock speed index
 	i += 3; // Reserved Bytes
 
-	uint64_t length = i;
-	if (!ch347_write_data(cmd_buf, &length) || length != i)
+	int len = i;
+	if (!ch347_write_data(cmd_buf, &len) || len != i)
 		return false;
 
-	length = 4;
+	len = 4;
 	memset(cmd_buf, 0, sizeof(cmd_buf));
 
-	if (!ch347_read_data(cmd_buf, &length) || length != 4)
+	if (!ch347_read_data(cmd_buf, &len) || len != 4)
 		return false;
 
 	return true;
-}
-
-/**
- * @brief Hex Conversion String Function
- *
- * @param buf    Point to a buffer to place the Hex data to be converted
- * @param size   Pointing to the length unit where data needs to be converted
- * @return Returns a converted string
- */
-static char *ch347_hex_to_string(uint8_t *buf, uint32_t size)
-{
-	uint32_t i;
-	if (!buf)
-		return "NULL";
-
-	char *str = calloc(size * 2 + 1, 1);
-
-	for (i = 0; i < size; i++)
-		sprintf(str + 2 * i, "%02x ", buf[i]);
-	return str;
 }
 
 /**
@@ -366,29 +343,30 @@ static char *ch347_hex_to_string(uint8_t *buf, uint32_t size)
  * written out, and the return is the actual written length
  * @return Write success returns true, failure returns false
  */
-static bool ch347_write(void *buffer, unsigned long *length)
+static bool ch347_write(uint8_t *buffer, int *length)
 {
-	int ret = -1;
-	uint64_t written_length = *length, i;
+	int written_len = *length;
 	if (*length >= HW_TDO_BUF_SIZE)
-		written_length = HW_TDO_BUF_SIZE;
-	i = 0;
-	while (1) {
-		ret = ch347_write_data((uint8_t *)buffer + i, &written_length);
-		if (!ret) {
+		written_len = HW_TDO_BUF_SIZE;
+	int i = 0;
+
+	while (true) {
+		if (!ch347_write_data(buffer + i, &written_len)) {
 			*length = 0;
 			return false;
 		}
-		LOG_DEBUG_IO("(size=%" PRIu64 ", buf=[%s]) -> %" PRIu32, written_length,
-				 ch347_hex_to_string((uint8_t *)buffer, written_length),
-				 (uint32_t)written_length);
-		i += written_length;
+		if (LOG_LEVEL_IS(LOG_LVL_DEBUG_IO)) {
+			char *str = buf_to_hex_str(buffer, written_len);
+			LOG_DEBUG_IO("size=%d, buf=[%s]", written_len, str);
+			free(str);
+		}
+		i += written_len;
 		if (i >= *length)
 			break;
 		if ((*length - i) > HW_TDO_BUF_SIZE)
-			written_length = HW_TDO_BUF_SIZE;
+			written_len = HW_TDO_BUF_SIZE;
 		else
-			written_length = *length - i;
+			written_len = *length - i;
 	}
 
 	*length = i;
@@ -403,31 +381,31 @@ static bool ch347_write(void *buffer, unsigned long *length)
  * be read, and the return is the actual read length
  * @return Write success returns true, failure returns false
  */
-static bool ch347_read(void *buffer, unsigned long *length)
+static bool ch347_read(uint8_t *buffer, int *length)
 {
-	uint64_t read_length = *length, i;
+	int read_len = *length;
 	/* The maximum allowable reading for a single read is 4096B of data.
 	   If it exceeds the allowable reading limit, it will be calculated as 4096B */
-	if (read_length > HW_TDO_BUF_SIZE)
-		read_length = HW_TDO_BUF_SIZE;
-	i = 0;
+	if (read_len > HW_TDO_BUF_SIZE)
+		read_len = HW_TDO_BUF_SIZE;
+	int i = 0;
 
-	while (1) {
-		if (!ch347_read_data((uint8_t *)buffer + i, &read_length)) {
+	while (true) {
+		if (!ch347_read_data(buffer + i, &read_len)) {
 			LOG_ERROR("CH347 read fail");
 			return false;
 		}
 
-		i += read_length;
+		i += read_len;
 		if (i >= *length)
 			break;
-		if ((*length - i) > HW_TDO_BUF_SIZE)
-			read_length = HW_TDO_BUF_SIZE;
-		else
-			read_length = *length - i;
+		read_len = (*length - i) > HW_TDO_BUF_SIZE ? HW_TDO_BUF_SIZE : *length - i;
 	}
-	LOG_DEBUG_IO("(size=%" PRIu64 ", buf=[%s]) -> %" PRIu32, i,
-			 ch347_hex_to_string((uint8_t *)buffer, i), (uint32_t)i);
+	if (LOG_LEVEL_IS(LOG_LVL_DEBUG_IO)) {
+		char *str = buf_to_hex_str(buffer, i);
+		LOG_DEBUG_IO("size=%d, buf=[%s]", i, str);
+		free(str);
+	}
 	*length = i;
 	return true;
 }
@@ -438,62 +416,62 @@ static bool ch347_read(void *buffer, unsigned long *length)
  * @param buffer Point to a buffer to place the data to be read in
  * @param length Data length in bytes that should be read via libusb
  */
-static void ch347_read_scan(uint8_t *buffer, uint32_t length)
+static void ch347_read_scan(uint8_t *buffer, int length)
 {
-	unsigned long read_size = 0;
-	unsigned long read_len = 0;
-	unsigned long index = 0;
-	unsigned long read_buf_index = 0;
-	unsigned char *read_buf = NULL;
-	int data_len = 0, i = 0;
-	int bit_counter = 0;
+	int read_len = length;
+	unsigned char *read_buf = calloc(sizeof(unsigned char), read_len);
+	if (!read_buf) {
+		LOG_ERROR("calloc failed");
+		return;
+	}
 
-	read_size = length;
-	read_len = read_size;
-	index = 0;
-	read_buf_index = 0;
-	read_buf = calloc(sizeof(unsigned char), read_size);
 	if (!ch347_read(read_buf, &read_len)) {
 		LOG_ERROR("CH347 read fail");
 		return;
 	}
-	while (index < read_size) { // deal with the CH347_CMD_JTAG_BIT_OP_RD  or  CH347_CMD_JTAG_DATA_SHIFT_RD
-		if (read_buf[index] == CH347_CMD_JTAG_DATA_SHIFT_RD) {
-			data_len = read_buf[++index] & 0xFF;
-			data_len += (read_buf[++index] & 0xFF) << 8;
-			memcpy(buffer + read_buf_index, &read_buf[index + 1],
-				   data_len);
-			read_buf_index += data_len;
-			index += data_len + 1;
-		} else if (read_buf[index] == CH347_CMD_JTAG_BIT_OP_RD) {
-			data_len = read_buf[++index] & 0xFF;
-			data_len += (read_buf[++index] & 0xFF) << 8;
 
-			for (i = 0; i < data_len; i++) {
-				if (read_buf[index + 1 + i] & 1)
-					*(buffer + read_buf_index) |= (1 << i % 8);
+	int data_len = 0;
+	int bit_counter = 0;
+	int rd_index = 0;
+	int buf_index = 0;
+
+	while (rd_index < read_len) {
+		// for CH347_CMD_JTAG_DATA_SHIFT_RD copy the data bytes
+		if (read_buf[rd_index] == CH347_CMD_JTAG_DATA_SHIFT_RD) {
+			data_len = le_to_h_u16(&read_buf[++rd_index]);
+			rd_index += 2;
+			memcpy(buffer + buf_index, &read_buf[rd_index], data_len);
+			buf_index += data_len;
+			rd_index += data_len;
+		} else if (read_buf[rd_index] == CH347_CMD_JTAG_BIT_OP_RD) {
+			// for CH347_CMD_JTAG_BIT_OP_RD we need to copy bit by bit
+			data_len = le_to_h_u16(&read_buf[++rd_index]);
+			rd_index += 2;
+
+			for (int i = 0; i < data_len; i++) {
+				if (read_buf[rd_index + i] & 1)
+					buffer[buf_index] |= (1 << i % 8);
 				else
-					*(buffer + read_buf_index) &= ~(1 << i % 8);
+					buffer[buf_index] &= ~(1 << i % 8);
 				bit_counter++;
-				// advance the buffer index every 8 bits
+				// advance the buffer index after every 8 bits stored
 				if (bit_counter % 8 == 0)
-					read_buf_index++;
+					buf_index++;
 			}
-			index += data_len + 1;
-			// after a read advance the buffer, because we put the bits from the next commands in the next buffer byte
+			rd_index += data_len;
+			/* after a read advance the buffer, because we put the bits from the next
+				commands in the next buffer byte. But don't advance twice. After the
+				8th bit the index is alread advanced */
 			if (bit_counter % 8 != 0)
-				read_buf_index++;
+				buf_index++;
 		} else {
 			LOG_ERROR("CH347 read command fail");
-			*(buffer + read_buf_index) = read_buf[index];
-			read_buf_index++;
-			index++;
+			buffer[buf_index] = read_buf[rd_index];
+			buf_index++;
+			rd_index++;
 		}
 	}
-	if (read_buf) {
-		free(read_buf);
-		read_buf = NULL;
-	}
+	free(read_buf);
 }
 
 /**
@@ -502,12 +480,13 @@ static void ch347_read_scan(uint8_t *buffer, uint32_t length)
  */
 static void ch347_flush_buffer(void)
 {
-	unsigned long ret_len = ch347.buffer_idx;
-	int nb = ch347.buffer_idx, ret = ERROR_OK;
+	int wr_len = ch347.buffer_idx;
+	int nb = ch347.buffer_idx;
+	int ret = ERROR_OK;
 
 	while (ret == ERROR_OK && nb > 0) {
-		ret = ch347_write(ch347.buffer, &ret_len);
-		nb -= ret_len;
+		ret = ch347_write(ch347.buffer, &wr_len);
+		nb -= wr_len;
 	}
 	memset(&ch347.buffer, 0, sizeof(ch347.buffer));
 	ch347.buffer_idx = 0;
@@ -518,7 +497,7 @@ static void ch347_flush_buffer(void)
 	if (ch347.read_count == 0)
 		return;
 	if (ch347.pack_size == LARGER_PACK) {
-		ch347_read_scan(&ch347.read_buffer[0], ch347.read_count);
+		ch347_read_scan(ch347.read_buffer, ch347.read_count);
 		bit_copy_execute(&ch347.read_queue);
 		memset(ch347.read_buffer, 0, SF_PACKET_BUF_SIZE);
 		ch347.read_count = 0;
@@ -527,8 +506,8 @@ static void ch347_flush_buffer(void)
 }
 
 /**
- * @brief Puts a byte for writing into the output buffer
- *
+ * @brief Puts a byte for writing into the output buffer.
+ * If buffer gets full it calls ch347_flush_buffer.
  * @param byte the byte
  */
 static void ch347_in_buffer(uint8_t byte)
@@ -544,34 +523,31 @@ static void ch347_in_buffer(uint8_t byte)
 /**
  * @brief Puts multiple byte for writing into the output buffer
  * @param bytes the bytes
- * @param bytes_length number of bytes
+ * @param count number of bytes
  */
-static void ch347_in_buffer_bytes(uint8_t *bytes, unsigned long bytes_length)
+static void ch347_in_buffer_bytes(uint8_t *bytes, int count)
 {
-	if ((ch347.buffer_idx + bytes_length) > SF_PACKET_BUF_SIZE)
+	if ((ch347.buffer_idx + count) > SF_PACKET_BUF_SIZE)
 		ch347_flush_buffer();
-	memcpy(&ch347.buffer[ch347.buffer_idx], bytes, bytes_length);
-	ch347.buffer_idx += bytes_length;
+	memcpy(&ch347.buffer[ch347.buffer_idx], bytes, count);
+	ch347.buffer_idx += count;
 	if ((SF_PACKET_BUF_SIZE - ch347.buffer_idx) < 1)
 		ch347_flush_buffer();
 }
 
 /**
- * @brief If two packets for the same usb command are in the writing buffer,
+ * @brief If two packets for the same USB command are in the writing buffer,
  * the commands will be combined into one bigger command
  *
  * @param cmd
  * @param cur_idx
  * @param len
  */
-static void ch347_combine_packets(uint8_t cmd, int cur_idx, unsigned long len)
+static void ch347_combine_packets(uint8_t cmd, int cur_idx, int len)
 {
 	if (cmd != ch347.last_cmd) {
 		ch347.buffer[cur_idx] = cmd;
-		ch347.buffer[cur_idx + 1] =
-			(uint8_t)(((len - CH347_CMD_HEADER) >> 0) & 0xFF);
-		ch347.buffer[cur_idx + 2] =
-			(uint8_t)(((len - CH347_CMD_HEADER) >> 8) & 0xFF);
+		h_u16_to_le(&ch347.buffer[cur_idx + 1], len - CH347_CMD_HEADER);
 
 		// update the ch347 struct
 		ch347.last_cmd = cmd;
@@ -582,13 +558,10 @@ static void ch347_combine_packets(uint8_t cmd, int cur_idx, unsigned long len)
 		ch347.len_value += (len - CH347_CMD_HEADER);
 
 		// update the cmd packet valid length
-		ch347.buffer[ch347.len_idx] = (uint8_t)((ch347.len_value >> 0) & 0xFF);
-		ch347.buffer[ch347.len_idx + 1] = (uint8_t)((ch347.len_value >> 8) & 0xFF);
+		h_u16_to_le(&ch347.buffer[ch347.len_idx], ch347.len_value);
 
 		// update the buffer data length
-		memcpy(&ch347.buffer[cur_idx],
-			   &ch347.buffer[cur_idx + CH347_CMD_HEADER],
-			   (len - CH347_CMD_HEADER));
+		memcpy(&ch347.buffer[cur_idx], &ch347.buffer[cur_idx + CH347_CMD_HEADER], (len - CH347_CMD_HEADER));
 
 		/* update the ch347 buffer index */
 		ch347.buffer_idx -= CH347_CMD_HEADER;
@@ -596,52 +569,43 @@ static void ch347_combine_packets(uint8_t cmd, int cur_idx, unsigned long len)
 }
 /**
  * @brief Function used to change the TMS value at the
- * rising edge of TCK to switch its Tap state
+ * rising edge of TCK to switch its TAP state
  *
- * @param tms TMS value to be changed
- * @param byte_index Protocol packet length
+ * @param tms TMS value to be changed; true = output TMS high; false = output TMS low
+ * @param buf_index Protocol packet length
  * @return Return protocol packet length
  */
-static unsigned long ch347_clock_tms(int tms, unsigned long byte_index)
+static int ch347_clock_tms(bool tms, int buf_index)
 {
-	uint8_t data = 0;
-	unsigned char cmd = 0;
-
-	if (tms == 1)
-		cmd = TMS_H;
-	else
-		cmd = TMS_L;
-
-	byte_index += 2;
-
+	uint8_t tms_bit = tms ? TMS_H : TMS_L;
 	uint8_t tdi_bit = ch347.tdi_pin ? TDI_H : TDI_L;
-	data = cmd | tdi_bit | TCK_L | TRST_H;
+	uint8_t trst_bit = ch347.trst_pin ? TRST_H : TRST_L;
+	// TCK = L
+	uint8_t data = tms_bit | tdi_bit | TCK_L | trst_bit;
 	ch347_in_buffer(data);
-	data = cmd | tdi_bit | TCK_H | TRST_H;
+	// TCK = H
+	data = tms_bit | tdi_bit | TCK_H | trst_bit;
 	ch347_in_buffer(data);
-	ch347.tms_pin = cmd;
+	ch347.tms_pin = tms_bit;
 	ch347.tck_pin = TCK_H;
-	ch347.trst_pin = TRST_H;
-
-	return byte_index;
+	return buf_index + 2;
 }
 
 /**
  * @brief Function to ensure that the clock is in a low state
  *
- * @param byte_index Protocol packet length
+ * @param buf_index Protocol packet length
  * @return Return protocol packet length
  */
-static unsigned long ch347_idle_clock(unsigned long byte_index)
+static int ch347_idle_clock(int buf_index)
 {
-	unsigned char byte = 0;
-	byte |= ch347.tms_pin ? TMS_H : TMS_L;
-	byte |= ch347.tdi_pin ? TDI_H : TDI_L;
-	byte |= ch347.trst_pin ? TRST_H : TRST_L;
-	byte_index++;
-	ch347_in_buffer(byte);
-
-	return byte_index;
+	uint8_t data = TCK_L;
+	data |= ch347.tms_pin ? TMS_H : TMS_L;
+	data |= ch347.tdi_pin ? TDI_H : TDI_L;
+	data |= ch347.trst_pin ? TRST_H : TRST_L;
+	ch347_in_buffer(data);
+	ch347.tck_pin = TCK_L;
+	return buf_index + 1;
 }
 
 /**
@@ -651,27 +615,20 @@ static unsigned long ch347_idle_clock(unsigned long byte_index)
  * @param step The number of bit values that need to be read from the tms_value value
  * @param skip Count from the skip bit of tms_value to step
  */
-static void ch347_tms_change(const unsigned char *tms_value, int step, int skip)
+static void ch347_tms_change(const uint8_t *tms_value, int step, int skip)
 {
-	int i;
-	int index = ch347.buffer_idx;
-	unsigned long byte_index, ret_len, cmd_len;
+	int prev_index = ch347.buffer_idx;
+	int buf_index = CH347_CMD_HEADER;
+	LOG_DEBUG_IO("TMS Value: %02x..., step = %d, skip = %d", tms_value[0], step, skip);
 
-	byte_index = CH347_CMD_HEADER;
-	ret_len = CH347_CMD_HEADER;
-	LOG_DEBUG_IO("(TMS Value: %02x..., step = %d, skip = %d)", tms_value[0],
-			 step, skip);
-
-	for (i = 0; i < 3; i++)
+	for (int i = 0; i < 3; i++)
 		ch347_in_buffer(0);
 
-	for (i = skip; i < step; i++) {
-		ret_len = ch347_clock_tms((tms_value[i / 8] >> (i % 8)) & 0x01, byte_index);
-		byte_index = ret_len;
-	}
-	cmd_len = ch347_idle_clock(byte_index);
+	for (int i = skip; i < step; i++)
+		buf_index = ch347_clock_tms((tms_value[i / 8] >> (i % 8)) & 0x01, buf_index);
+	int cmd_len = ch347_idle_clock(buf_index);
 
-	ch347_combine_packets(CH347_CMD_JTAG_BIT_OP, index, cmd_len);
+	ch347_combine_packets(CH347_CMD_JTAG_BIT_OP, prev_index, cmd_len);
 }
 
 /**
@@ -681,7 +638,7 @@ static void ch347_tms_change(const unsigned char *tms_value, int step, int skip)
  */
 static void ch347_tms(struct tms_command *cmd)
 {
-	LOG_DEBUG_IO("(step: %d)", cmd->num_bits);
+	LOG_DEBUG_IO("step: %d", cmd->num_bits);
 	ch347_tms_change(cmd->bits, cmd->num_bits, 0);
 }
 
@@ -693,9 +650,12 @@ static void ch347_tms(struct tms_command *cmd)
  */
 static void ch347_gpio_set(int gpio, bool data)
 {
+	// fixed length of the GPIO control command
+	const int gpio_cmd_len = CH347_CMD_HEADER + GPIO_CNT;
+
 	// build a gpio control command
-	unsigned long cmd_len = CH347_GPIO_CMD_LENGTH;
-	uint8_t gpio_cmd[CH347_GPIO_CMD_LENGTH];
+	int cmd_len = gpio_cmd_len;
+	uint8_t gpio_cmd[gpio_cmd_len];
 	memset(gpio_cmd, 0, sizeof(gpio_cmd));
 	gpio_cmd[0] = CH347_CMD_GPIO;
 	gpio_cmd[1] = GPIO_CNT;
@@ -705,14 +665,14 @@ static void ch347_gpio_set(int gpio, bool data)
 		bit 3 is the data bit */
 	gpio_cmd[CH347_CMD_HEADER + gpio] = data == 0 ? 0xF0 : 0xF8;
 
-	if (!ch347_write(gpio_cmd, &cmd_len) && cmd_len != CH347_GPIO_CMD_LENGTH) {
-		LOG_ERROR("JTAG_Gpio send usb data failure.");
+	if (!ch347_write(gpio_cmd, &cmd_len) && cmd_len != gpio_cmd_len) {
+		LOG_ERROR("send usb data failure.");
 		return;
-	} else if (!ch347_read(gpio_cmd, &cmd_len) && cmd_len != CH347_GPIO_CMD_LENGTH) {
-		LOG_ERROR("JTAG_Gpio read usb data failure.");
+	} else if (!ch347_read(gpio_cmd, &cmd_len) && cmd_len != gpio_cmd_len) {
+		LOG_ERROR("read usb data failure.");
 		return;
 	} else if ((gpio_cmd[CH347_CMD_HEADER + gpio] & 0x40) >> 6 != data) {
-		LOG_ERROR("JTAG_Gpio output not set.");
+		LOG_ERROR("output not set.");
 		return;
 	}
 }
@@ -778,30 +738,25 @@ static int ch347_reset(int trst, int srst)
  */
 static void ch347_move_path(struct pathmove_command *cmd)
 {
-	int i;
-	int index = ch347.buffer_idx;
-	unsigned long byte_index, ret_len = 0, cmd_len;
+	int prev_index = ch347.buffer_idx;
+	int buf_index = CH347_CMD_HEADER;
 
-	byte_index = CH347_CMD_HEADER;
-
-	for (i = 0; i < 3; i++)
+	for (int i = 0; i < 3; i++)
 		ch347_in_buffer(0);
-	LOG_DEBUG_IO("(num_states=%d, last_state=%d)",
+	LOG_DEBUG_IO("num_states=%d, last_state=%d",
 			 cmd->num_states, cmd->path[cmd->num_states - 1]);
 
-	for (i = 0; i < cmd->num_states; i++) {
+	for (int i = 0; i < cmd->num_states; i++) {
 		if (tap_state_transition(tap_get_state(), false) ==	cmd->path[i])
-			ret_len = ch347_clock_tms(0, byte_index);
-		byte_index = ret_len;
+			buf_index = ch347_clock_tms(0, buf_index);
 		if (tap_state_transition(tap_get_state(), true) == cmd->path[i])
-			ret_len = ch347_clock_tms(1, byte_index);
-		byte_index = ret_len;
+			buf_index = ch347_clock_tms(1, buf_index);
 		tap_set_state(cmd->path[i]);
 	}
 
-	cmd_len = ch347_idle_clock(byte_index);
+	int cmd_len = ch347_idle_clock(buf_index);
 
-	ch347_combine_packets(CH347_CMD_JTAG_BIT_OP, index, cmd_len);
+	ch347_combine_packets(CH347_CMD_JTAG_BIT_OP, prev_index, cmd_len);
 }
 
 /**
@@ -815,8 +770,7 @@ static void ch347_move_state(tap_state_t state, int skip)
 	uint8_t tms_scan;
 	int tms_len;
 
-	LOG_DEBUG_IO("(from %s to %s)", tap_state_name(tap_get_state()),
-			 tap_state_name(state));
+	LOG_DEBUG_IO("from %s to %s", tap_state_name(tap_get_state()), tap_state_name(state));
 	// don't do anything if we are already in the right state; but do execute always the TAP_RESET
 	if (tap_get_state() == state && state != TAP_RESET)
 		return;
@@ -834,12 +788,17 @@ static void ch347_move_state(tap_state_t state, int skip)
  */
 static void ch347_scan_data_to_fields(struct scan_command *cmd, uint8_t *read_data)
 {
+	if (!cmd) {
+		LOG_ERROR("cmd is NULL!");
+		return;
+	}
+
 	int offset = 0;
 	int num_bits = 0;
 
 	for (int i = 0; i < cmd->num_fields; i++) {
 		// if neither in_value nor in_handler are specified we don't have to examine this field
-		LOG_DEBUG("fields[%i].in_value[%i], offset: %d", i, cmd->fields[i].num_bits, offset);
+		LOG_DEBUG("fields[%d].in_value[%d], offset: %d", i, cmd->fields[i].num_bits, offset);
 		num_bits = cmd->fields[i].num_bits;
 		if (cmd->fields[i].in_value) {
 			if (ch347.pack_size == LARGER_PACK) {
@@ -850,15 +809,22 @@ static void ch347_scan_data_to_fields(struct scan_command *cmd, uint8_t *read_da
 				if (num_bits > 7)
 					ch347.read_idx += DIV_ROUND_UP(offset, 8);
 			} else {
-				uint8_t *captured = buf_set_buf(read_data, offset, malloc(DIV_ROUND_UP(num_bits, 8)), 0, num_bits);
+				uint8_t *buffer = malloc(DIV_ROUND_UP(num_bits, 8));
+				if (!buffer) {
+					LOG_ERROR("malloc failed");
+					return;
+				}
+				uint8_t *captured = buf_set_buf(read_data, offset, buffer, 0, num_bits);
 
 				if (LOG_LEVEL_IS(LOG_LVL_DEBUG_IO)) {
-					char *char_buf = buf_to_hex_str(captured, (num_bits > DEBUG_JTAG_IOZ) ? DEBUG_JTAG_IOZ : num_bits);
-					free(char_buf);
+					int size = num_bits > DEBUG_JTAG_IOZ ? DEBUG_JTAG_IOZ : num_bits;
+					char *str = buf_to_hex_str(captured, size);
+					LOG_DEBUG_IO("size=%d, buf=[%s]", size, str);
+					free(str);
 				}
 				if (cmd->fields[i].in_value)
 					buf_cpy(captured, cmd->fields[i].in_value, num_bits);
-				free(captured);
+				free(buffer);
 			}
 		}
 		offset += num_bits;
@@ -877,7 +843,6 @@ static void ch347_scan_data_to_fields(struct scan_command *cmd, uint8_t *read_da
  */
 static void ch347_write_read_bitwise(struct scan_command *cmd, uint8_t *bits, int nb_bits, enum scan_type scan)
 {
-	int i = 0;
 	int chunk_data_length = 0;
 	int chunk_bit_count = 0;
 	int chunk_count = 0;
@@ -892,6 +857,7 @@ static void ch347_write_read_bitwise(struct scan_command *cmd, uint8_t *bits, in
 	}
 
 	bool is_read = (scan == SCAN_IN || scan == SCAN_IO);
+	int i = 0;
 
 	while (i < nb_bits) {
 		// we need two bytes for each bit (one for TCK_L and one for TCK_H)
@@ -913,20 +879,21 @@ static void ch347_write_read_bitwise(struct scan_command *cmd, uint8_t *bits, in
 		ch347_in_buffer((uint8_t)(chunk_data_length >> 8) & 0xFF);
 
 		tms_bit = TMS_L;
+		uint8_t trst_bit = ch347.trst_pin ? TRST_H : TRST_L;
 		for (int j = 0; j < chunk_bit_count; j++) {
 			tdi_bit = ((bits[i / 8] >> i % 8) & 0x01) ? TDI_H : TDI_L;
 			// for the last bit set TMS high to exit the shift state
 			if ((i + 1) == nb_bits)
 				tms_bit = TMS_H;
 
-			ch347_in_buffer(tms_bit | tdi_bit | TCK_L | TRST_H);
-			ch347_in_buffer(tms_bit | tdi_bit | TCK_H | TRST_H);
+			ch347_in_buffer(tms_bit | tdi_bit | TCK_L | trst_bit);
+			ch347_in_buffer(tms_bit | tdi_bit | TCK_H | trst_bit);
 
 			i++;
 		}
 		// one TCK_L after the last bit
 		if (i == nb_bits)
-			ch347_in_buffer(tms_bit | tdi_bit | TCK_L | TRST_H);
+			ch347_in_buffer(tms_bit | tdi_bit | TCK_L | trst_bit);
 
 		chunk_count++;
 	}
@@ -935,9 +902,12 @@ static void ch347_write_read_bitwise(struct scan_command *cmd, uint8_t *bits, in
 	ch347.tdi_pin = tdi_bit;
 	ch347.tck_pin = TCK_L;
 
-	uint8_t *read_data = NULL;
 	if (is_read) {
-		read_data = calloc(SF_PACKET_BUF_SIZE, 1);
+		uint8_t *read_data = calloc(SF_PACKET_BUF_SIZE, 1);
+		if (!read_data) {
+			LOG_ERROR("calloc failed");
+			return;
+		}
 		uint32_t read_len = nb_bits + chunk_count * CH347_CMD_HEADER;
 		ch347.read_count = read_len;
 
@@ -947,18 +917,15 @@ static void ch347_write_read_bitwise(struct scan_command *cmd, uint8_t *bits, in
 		}
 
 		ch347_scan_data_to_fields(cmd, read_data);
+		free(read_data);
 	}
 
-	int temp_index = ch347.buffer_idx;
+	int prev_index = ch347.buffer_idx;
 	for (i = 0; i < CH347_CMD_HEADER; i++)
 		ch347_in_buffer(0);
-	unsigned long byte_index = CH347_CMD_HEADER;
-	byte_index = ch347_idle_clock(byte_index);
-	ch347_combine_packets(CH347_CMD_JTAG_BIT_OP, temp_index, byte_index);
-	if (read_data) {
-		free(read_data);
-		read_data = NULL;
-	}
+	int buf_index = CH347_CMD_HEADER;
+	buf_index = ch347_idle_clock(buf_index);
+	ch347_combine_packets(CH347_CMD_JTAG_BIT_OP, prev_index, buf_index);
 }
 
 /**
@@ -973,14 +940,8 @@ static void ch347_write_read(struct scan_command *cmd, uint8_t *bits, int nb_bit
 {
 	int nb8 = nb_bits / 8;
 	int nb1 = nb_bits % 8;
-	int i = 0;
-	bool is_read = false;
-	uint8_t tms_bit = 0, tdi_bit = 0, cmd_bit;
 	static uint8_t byte0[SF_PACKET_BUF_SIZE];
-	uint8_t *read_data = calloc(SF_PACKET_BUF_SIZE, 1);
-	unsigned long read_len = 0;
-	unsigned long byte_index = 0, di, dii, pkt_data_len, d_len = 0, temp_index,
-		total_read_length = 0, temp_length = 0;
+
 	if (ch347.pack_size == LARGER_PACK) {
 		if ((ch347.read_count >= (USBC_PACKET_USBHS_SINGLE * 1)))
 			ch347_flush_buffer();
@@ -993,16 +954,16 @@ static void ch347_write_read(struct scan_command *cmd, uint8_t *bits, int nb_bit
 		nb1 = 8;
 	}
 
-	is_read = (scan == SCAN_IN || scan == SCAN_IO);
-	di = 0;
-	byte_index = 0;
-	while (di < (unsigned long)nb8) {
-		if ((nb8 - di) > UCMDPKT_DATA_MAX_BYTES_USBHS)
+	bool is_read = (scan == SCAN_IN || scan == SCAN_IO);
+	int temp_len = 0;
+	int pkt_data_len;
+	int i = 0;
+
+	while (i < nb8) {
+		if ((nb8 - i) > UCMDPKT_DATA_MAX_BYTES_USBHS)
 			pkt_data_len = UCMDPKT_DATA_MAX_BYTES_USBHS;
 		else
-			pkt_data_len = nb8 - di;
-
-		dii = pkt_data_len;
+			pkt_data_len = nb8 - i;
 
 		if (is_read)
 			ch347_in_buffer(CH347_CMD_JTAG_DATA_SHIFT_RD);
@@ -1022,20 +983,27 @@ static void ch347_write_read(struct scan_command *cmd, uint8_t *bits, int nb_bit
 		ch347_in_buffer((uint8_t)(pkt_data_len >> 8) & 0xFF);
 
 		if (bits)
-			ch347_in_buffer_bytes(&bits[di], pkt_data_len);
+			ch347_in_buffer_bytes(&bits[i], pkt_data_len);
 		else
 			ch347_in_buffer_bytes(byte0, pkt_data_len);
-		di += dii;
+		i += pkt_data_len;
 
-		temp_length += (dii + CH347_CMD_HEADER);
+		temp_len += (pkt_data_len + CH347_CMD_HEADER);
 	}
 
-	total_read_length += temp_length;
+	int total_rd_len = temp_len;
+	int read_len = 0;
 
 	if (is_read) {
-		ch347.read_count += temp_length;
-		read_len += temp_length;
+		ch347.read_count += temp_len;
+		read_len += temp_len;
 	}
+
+	int d_len = 0;
+
+	uint8_t tms_bit = 0;
+	uint8_t tdi_bit = 0;
+	uint8_t cmd_bit;
 
 	if (bits) {
 		cmd_bit = is_read ? CH347_CMD_JTAG_BIT_OP_RD : CH347_CMD_JTAG_BIT_OP;
@@ -1059,19 +1027,18 @@ static void ch347_write_read(struct scan_command *cmd, uint8_t *bits, int nb_bit
 		}
 
 		tms_bit = TMS_L;
-		for (i = 0; i < nb1; i++) {
-			if ((bits[nb8] >> i) & 0x01)
-				tdi_bit = TDI_H;
-			else
-				tdi_bit = TDI_L;
+		uint8_t trst_bit = ch347.trst_pin ? TRST_H : TRST_L;
 
-			if ((i + 1) == nb1)
+		for (int j = 0; j < nb1; j++) {
+			tdi_bit = (bits[nb8] >> j) & 0x01 ? TDI_H : TDI_L;
+
+			if ((j + 1) == nb1)
 				tms_bit = TMS_H;
 
-			ch347_in_buffer(tms_bit | tdi_bit | TCK_L | TRST_H);
-			ch347_in_buffer(tms_bit | tdi_bit | TCK_H | TRST_H);
+			ch347_in_buffer(tms_bit | tdi_bit | TCK_L | trst_bit);
+			ch347_in_buffer(tms_bit | tdi_bit | TCK_H | trst_bit);
 		}
-		ch347_in_buffer(tms_bit | tdi_bit | TCK_L | TRST_H);
+		ch347_in_buffer(tms_bit | tdi_bit | TCK_L | trst_bit);
 	}
 
 	ch347.tms_pin = tms_bit;
@@ -1079,33 +1046,33 @@ static void ch347_write_read(struct scan_command *cmd, uint8_t *bits, int nb_bit
 	ch347.tck_pin = TCK_L;
 
 	if (is_read) {
-		temp_length = ((d_len / 2) + CH347_CMD_HEADER);
-		total_read_length += temp_length;
-		ch347.read_count += temp_length;
-		read_len += temp_length;
-		di = 0;
-		byte_index = 0;
+		temp_len = ((d_len / 2) + CH347_CMD_HEADER);
+		total_rd_len += temp_len;
+		ch347.read_count += temp_len;
+		read_len += temp_len;
 	}
-	if (is_read && total_read_length > 0) {
+	if (is_read && total_rd_len > 0) {
+		uint8_t *read_data = calloc(SF_PACKET_BUF_SIZE, 1);
+		if (!read_data) {
+			LOG_ERROR("calloc failed");
+			return;
+		}
 		if (ch347.pack_size == STANDARD_PACK && bits && cmd) {
 			ch347_flush_buffer();
 			ch347_read_scan(read_data, read_len);
 		}
 
 		ch347_scan_data_to_fields(cmd, read_data);
+		free(read_data);
 	}
 
-	temp_index = ch347.buffer_idx;
+	int prev_index = ch347.buffer_idx;
 	for (i = 0; i < CH347_CMD_HEADER; i++)
 		ch347_in_buffer(0);
-	byte_index = CH347_CMD_HEADER;
-	byte_index = ch347_idle_clock(byte_index);
+	int buf_index = CH347_CMD_HEADER;
+	buf_index = ch347_idle_clock(buf_index);
 
-	ch347_combine_packets(CH347_CMD_JTAG_BIT_OP, temp_index, byte_index);
-	if (read_data) {
-		free(read_data);
-		read_data = NULL;
-	}
+	ch347_combine_packets(CH347_CMD_JTAG_BIT_OP, prev_index, buf_index);
 }
 
 /**
@@ -1116,7 +1083,7 @@ static void ch347_write_read(struct scan_command *cmd, uint8_t *bits, int nb_bit
  */
 static void ch347_run_test(int cycles, tap_state_t state)
 {
-	LOG_DEBUG_IO("%s(cycles=%i, end_state=%d)", __func__, cycles, state);
+	LOG_DEBUG_IO("cycles=%d, end_state=%d", cycles, state);
 	if (tap_get_state() != TAP_IDLE)
 		ch347_move_state(TAP_IDLE, 0);
 
@@ -1135,7 +1102,7 @@ static void ch347_run_test(int cycles, tap_state_t state)
  */
 static void ch347_stable_clocks(int cycles)
 {
-	LOG_DEBUG_IO("%s(cycles=%i)", __func__, cycles);
+	LOG_DEBUG_IO("cycles=%d", cycles);
 	ch347.write_read_fn(NULL, NULL, cycles, SCAN_OUT);
 }
 
@@ -1143,34 +1110,29 @@ static void ch347_stable_clocks(int cycles)
  * @brief Switch to SHIFT-DR or SHIFT-IR status for scanning
  *
  * @param cmd Upper layer transfer command parameters
- * @return Success returns ERROR_OK
+ * @return Always ERROR_OK
  */
 static int ch347_scan(struct scan_command *cmd)
 {
-	int scan_bits;
-	uint8_t *buf = NULL;
-	enum scan_type type;
-	int ret = ERROR_OK;
 	static const char *const type2str[] = {"", "SCAN_IN", "SCAN_OUT", "SCAN_IO"};
-	char *log_buf = NULL;
 
-	type = jtag_scan_type(cmd);
-	scan_bits = jtag_build_buffer(cmd, &buf);
+	enum scan_type type = jtag_scan_type(cmd);
+	uint8_t *buf = NULL;
+	int scan_bits = jtag_build_buffer(cmd, &buf);
 
 	if (cmd->ir_scan)
 		ch347_move_state(TAP_IRSHIFT, 0);
 	else
 		ch347_move_state(TAP_DRSHIFT, 0);
 
-	log_buf = ch347_hex_to_string(buf, DIV_ROUND_UP(scan_bits, 8));
-	LOG_DEBUG_IO("Scan");
-	LOG_DEBUG_IO("%s(scan=%s, type=%s, bits=%d, buf=[%s], end_state=%d)",
-			 __func__,
+	if (LOG_LEVEL_IS(LOG_LVL_DEBUG_IO)) {
+		char *log_buf = buf_to_hex_str(buf, DIV_ROUND_UP(scan_bits, 8));
+		LOG_DEBUG_IO("scan=%s, type=%s, bits=%d, buf=[%s], end_state=%d",
 			 cmd->ir_scan ? "IRSCAN" : "DRSCAN",
 			 type2str[type],
 			 scan_bits, log_buf, cmd->end_state);
-
-	free(log_buf);
+		free(log_buf);
+	}
 
 	ch347.write_read_fn(cmd, buf, scan_bits, type);
 
@@ -1178,7 +1140,7 @@ static int ch347_scan(struct scan_command *cmd)
 
 	ch347_move_state(cmd->end_state, 1);
 
-	return ret;
+	return ERROR_OK;
 }
 
 /**
@@ -1188,7 +1150,7 @@ static int ch347_scan(struct scan_command *cmd)
  */
 static void ch347_sleep(int us)
 {
-	LOG_DEBUG_IO("%s(us=%d)", __func__, us);
+	LOG_DEBUG_IO("us=%d", us);
 	jtag_sleep(us);
 }
 
@@ -1208,7 +1170,7 @@ static int ch347_execute_queue(void)
 		 cmd = cmd->next) {
 		switch (cmd->type) {
 		case JTAG_RESET:
-			LOG_DEBUG_IO("JTAG_RESET : %d %d.\n",
+			LOG_DEBUG_IO("JTAG_RESET : %d %d",
 					 cmd->cmd.reset->trst,
 					 cmd->cmd.reset->srst);
 			ch347_reset(cmd->cmd.reset->trst, cmd->cmd.reset->srst);
@@ -1299,7 +1261,7 @@ static int ch347_quit(void)
 	// on close set the LED on, because the state without JTAG is on
 	ch347_set_activity_led(LED_ON);
 
-	unsigned long retlen = 4;
+	int retlen = 4;
 	uint8_t byte[4] = {CH347_CMD_JTAG_BIT_OP, 0x01, 0x00, ch347.trst_pin};
 	if (!swd_mode) {
 		ch347_write(byte, &retlen);
@@ -1323,8 +1285,7 @@ static int ch347_quit(void)
  */
 static bool ch347_check_speed(uint8_t clock_index)
 {
-	unsigned long i = 0, j;
-	bool ret_val;
+	int i = 0;
 	uint8_t cmd_buf[32] = "";
 	cmd_buf[i++] = CH347_CMD_JTAG_INIT;
 	cmd_buf[i++] = 6;
@@ -1333,10 +1294,10 @@ static bool ch347_check_speed(uint8_t clock_index)
 	cmd_buf[i++] = 0;
 	cmd_buf[i++] = clock_index;
 
-	for (j = 0; j < 4; j++)
+	for (int j = 0; j < 4; j++)
 		cmd_buf[i++] = ch347.tck_pin | ch347.tdi_pin | ch347.tms_pin | ch347.trst_pin;
 
-	uint64_t length = i;
+	int length = i;
 	if (!ch347_write_data(cmd_buf, &length) || length != i)
 		return false;
 
@@ -1346,8 +1307,7 @@ static bool ch347_check_speed(uint8_t clock_index)
 	if (!ch347_read_data(cmd_buf, &length) || length != 4)
 		return false;
 
-	ret_val = ((cmd_buf[0] == CH347_CMD_JTAG_INIT) && (cmd_buf[CH347_CMD_HEADER] == 0));
-	return ret_val;
+	return cmd_buf[0] == CH347_CMD_JTAG_INIT && cmd_buf[CH347_CMD_HEADER] == 0;
 }
 
 /**
@@ -1361,12 +1321,8 @@ static bool ch347_jtag_init(uint8_t clock_index)
 {
 	// when checking with speed index 9 we can see if the device supports STANDARD_PACK or LARGER_PACK mode
 	ch347.pack_size = ch347_check_speed(0x09) ? STANDARD_PACK : LARGER_PACK;
-	if (ch347.pack_size == STANDARD_PACK) {
-		if (clock_index - 2 < 0)
-			return ch347_check_speed(0);
-		else
-			return ch347_check_speed(clock_index - 2);
-	}
+	if (ch347.pack_size == STANDARD_PACK)
+		return (clock_index - 2 < 0) ? ch347_check_speed(0) : ch347_check_speed(clock_index - 2);
 
 	return ch347_check_speed(clock_index);
 }
@@ -1379,24 +1335,19 @@ static bool ch347_jtag_init(uint8_t clock_index)
  */
 static int ch347_speed(int speed)
 {
-	unsigned long i = 0;
-	uint8_t clock_index;
-	int ret_val = -1;
-	// there are these 8 speeds possible
-	int speed_clock[8] = {KHZ(468.75), KHZ(937.5), MHZ(1.875), MHZ(3.75), MHZ(7.5), MHZ(15), MHZ(30), MHZ(60)};
-
 	if (!swd_mode) {
-		for (i = 0; i < (sizeof(speed_clock) / sizeof(int)); i++) {
-			if (speed >= speed_clock[i] &&
-				speed <= speed_clock[i + 1]) {
-				clock_index = i + 1;
-				ret_val = ch347_jtag_init(clock_index);
+		// needs to be -1 because we use i+1 in the loop
+		int end = sizeof(ch347_clock_speeds) / sizeof(int) - 1;
+		for (int i = 0; i < end; i++) {
+			int ret_val = -1;
+			if (speed >= ch347_clock_speeds[i] && speed <= ch347_clock_speeds[i + 1]) {
+				ret_val = ch347_jtag_init(i + 1);
 				if (!ret_val) {
 					LOG_ERROR("Couldn't set CH347 TCK speed");
 					return ret_val;
 				}
 				break;
-			} else if (speed < speed_clock[0]) {
+			} else if (speed < ch347_clock_speeds[0]) {
 				ret_val = ch347_jtag_init(0);
 				if (!ret_val) {
 					LOG_ERROR("Couldn't set CH347 TCK speed");
@@ -1445,15 +1396,15 @@ static int ch347_khz(int khz, int *jtag_speed)
  * @param status Pin status
  * @return ERROR_OK at success; ERROR_FAIL otherwise
  */
-static int ch347_trst_out(unsigned char status)
+static int ch347_trst_out(uint8_t status)
 {
-	unsigned long byte_index = 0;
-	unsigned char byte = 0;
-	unsigned char cmd_packet[4] = "";
+	int byte_index = 0;
+	uint8_t cmd_packet[4] = "";
+	ch347.trst_pin = status ? TRST_H : TRST_L;
 	cmd_packet[byte_index++] = CH347_CMD_JTAG_BIT_OP;
 	cmd_packet[byte_index++] = 0x01;
 	cmd_packet[byte_index++] = 0;
-	byte = ch347.tck_pin | ch347.tdi_pin | ch347.tms_pin | (ch347.trst_pin = (status ? TRST_H : TRST_L));
+	uint8_t byte = ch347.tck_pin | ch347.tdi_pin | ch347.tms_pin | ch347.trst_pin;
 	cmd_packet[byte_index++] = byte;
 
 	if (!ch347_write(cmd_packet, &byte_index)) {
@@ -1553,7 +1504,7 @@ static const struct command_registration ch347_subcommand_handlers[] = {
 		.handler = &ch347_handle_vid_pid_command,
 		.mode = COMMAND_CONFIG,
 		.help = "the vendor ID and product ID of the CH347 device",
-		.usage = "(vid pid)*",
+		.usage = "vid pid",
 	},
 	{
 		.name = "jtag_ntrst_delay",
@@ -1596,7 +1547,6 @@ static const struct command_registration ch347_command_handlers[] = {
  */
 static int ch347_swd_init(void)
 {
-	struct ch347_swd_io *pswd_io;
 	LOG_INFO("CH347 SWD mode enabled");
 	swd_mode = true;
 	memset(&ch347_swd_context, 0, sizeof(ch347_swd_context));
@@ -1607,9 +1557,9 @@ static int ch347_swd_init(void)
 	ch347_swd_context.queued_retval = ERROR_OK;
 	// 0XE8 + 2byte len + N byte cmds
 	ch347_swd_context.send_len = CH347_CMD_HEADER;
-	//  0XE8 + 2byte len + N byte ack + data
+	// 0XE8 + 2byte len + N byte ack + data
 	ch347_swd_context.need_recv_len = CH347_CMD_HEADER;
-	pswd_io = ch347_swd_context.ch347_cmd_buf;
+	struct ch347_swd_io *pswd_io = ch347_swd_context.ch347_cmd_buf;
 	for (int i = 0; i < CH347_MAX_CMD_BUF; i++, pswd_io++) {
 		INIT_LIST_HEAD(&pswd_io->list_entry);
 		list_add_tail(&pswd_io->list_entry,	&ch347_swd_context.free_cmd_head);
@@ -1634,15 +1584,13 @@ static struct ch347_swd_io *ch347_get_one_swd_io(void)
 
 static void ch347_swd_queue_flush(void)
 {
-	uint64_t length = ch347_swd_context.send_len;
+	int length = ch347_swd_context.send_len;
 	ch347_swd_context.send_buf[0] = (uint8_t)CH347_CMD_SWD;
-	ch347_swd_context.send_buf[1] = (uint8_t)(ch347_swd_context.send_len -
-						  CH347_CMD_HEADER);
-	ch347_swd_context.send_buf[2] = (uint8_t)((ch347_swd_context.send_len -
-						   CH347_CMD_HEADER) >> 8);
+	ch347_swd_context.send_buf[1] = (uint8_t)(ch347_swd_context.send_len - CH347_CMD_HEADER);
+	ch347_swd_context.send_buf[2] = (uint8_t)((ch347_swd_context.send_len - CH347_CMD_HEADER) >> 8);
 	if (!ch347_write_data(ch347_swd_context.send_buf, &length) || length != ch347_swd_context.send_len) {
 		ch347_swd_context.queued_retval = ERROR_FAIL;
-		LOG_DEBUG("CH347WriteData error ");
+		LOG_DEBUG("CH347WriteData error");
 		return;
 	}
 	ch347_swd_context.recv_len = 0;
@@ -1650,16 +1598,14 @@ static void ch347_swd_queue_flush(void)
 		length = CH347_MAX_RECV_BUF - ch347_swd_context.recv_len;
 		if (!ch347_read_data(&ch347_swd_context.recv_buf[ch347_swd_context.recv_len], &length)) {
 			ch347_swd_context.queued_retval = ERROR_FAIL;
-			LOG_DEBUG("CH347ReadData error ");
+			LOG_DEBUG("CH347ReadData error");
 			return;
 		}
 		ch347_swd_context.recv_len += length;
 	} while (ch347_swd_context.recv_len < ch347_swd_context.need_recv_len);
 
 	if (ch347_swd_context.need_recv_len > ch347_swd_context.recv_len) {
-		LOG_ERROR("%s write/read failed %d %d %d",
-			  __func__,
-			  __LINE__,
+		LOG_ERROR("write/read failed %d %d",
 			  ch347_swd_context.recv_len,
 			  ch347_swd_context.need_recv_len);
 	}
@@ -1667,8 +1613,7 @@ static void ch347_swd_queue_flush(void)
 
 static void ch347_write_swd_reg(uint8_t cmd, const uint8_t *out, uint8_t parity)
 {
-	ch347_swd_context.send_buf[ch347_swd_context.send_len++] =
-		CH347_CMD_SWD_REG_W;
+	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = CH347_CMD_SWD_REG_W;
 	// 8bit + 32bit +1bit
 	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = 0x29;
 	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = 0x00;
@@ -1688,42 +1633,32 @@ static void ch347_write_spec_seq(const uint8_t *out, uint8_t out_len)
 		CH347_CMD_SWD_SEQ_W;
 	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = out_len;
 	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = 0x00;
-	for (uint8_t i = 0; i < DIV_ROUND_UP(out_len, 8); i++) {
-		if (out)
-			ch347_swd_context.send_buf[ch347_swd_context.send_len++] = out[i];
-		else
-			ch347_swd_context.send_buf[ch347_swd_context.send_len++] = 0x00;
-	}
+	for (uint8_t i = 0; i < DIV_ROUND_UP(out_len, 8); i++)
+		ch347_swd_context.send_buf[ch347_swd_context.send_len++] = out ? out[i] : 0x00;
 	ch347_swd_context.need_recv_len += 1; /* 0xA1 */
 }
 
 static void ch347_read_swd_reg(uint8_t cmd)
 {
-	ch347_swd_context.send_buf[ch347_swd_context.send_len++] =
-		CH347_CMD_SWD_REG_R;
+	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = CH347_CMD_SWD_REG_R;
 	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = 0x22;
 	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = 0x00;
 	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = cmd;
-	/* 0xA2 + 1 byte(3bit ACK) + 4 byte(data) +
-	   1 byte(1bit parity+1bit trn) */
+	// 0xA2 + 1 byte(3bit ACK) + 4 byte(data) + 1 byte(1bit parity+1bit trn)
 	ch347_swd_context.need_recv_len += 1 + 1 + 4 + 1;
 }
 
 static int ch347_swd_switch_out(enum swd_special_seq seq, const uint8_t *out, unsigned int out_len)
 {
-	struct ch347_swd_io *pswd_io;
-	if ((ch347_swd_context.send_len +
-		 (1 + 2 + DIV_ROUND_UP(out_len, 8))) > CH347_MAX_SEND_BUF) {
+	if ((ch347_swd_context.send_len + (1 + 2 + DIV_ROUND_UP(out_len, 8))) > CH347_MAX_SEND_BUF)
 		return ERROR_FAIL;
-	}
 	if ((ch347_swd_context.need_recv_len + 2) > CH347_MAX_RECV_BUF)
 		return ERROR_FAIL;
 
-	pswd_io = ch347_get_one_swd_io();
+	struct ch347_swd_io *pswd_io = ch347_get_one_swd_io();
 	if (pswd_io) {
 		ch347_write_spec_seq(out, out_len);
-		list_add_tail(&pswd_io->list_entry,
-				  &ch347_swd_context.send_cmd_head);
+		list_add_tail(&pswd_io->list_entry, &ch347_swd_context.send_cmd_head);
 		return ERROR_OK;
 	} else {
 		return ERROR_FAIL;
@@ -1733,11 +1668,10 @@ static int ch347_swd_switch_out(enum swd_special_seq seq, const uint8_t *out, un
 // check read/write REG can fill in remaining buff
 static bool ch347_chk_buf_size(uint8_t cmd, uint32_t ap_delay_clk)
 {
-	bool flush;
-	uint32_t send_len, recv_len, len;
-	flush = false;
-	send_len = ch347_swd_context.send_len;
-	recv_len = ch347_swd_context.need_recv_len;
+	bool flush = false;
+	int send_len = ch347_swd_context.send_len;
+	int recv_len = ch347_swd_context.need_recv_len;
+	int len;
 	do {
 		if (cmd & SWD_CMD_RNW) {
 			len = 1 + 1 + 1 + 1; // 0xA2 + len + rev + cmd
@@ -1779,14 +1713,12 @@ static bool ch347_chk_buf_size(uint8_t cmd, uint32_t ap_delay_clk)
 
 static void ch347_swd_send_idle(uint32_t ap_delay_clk)
 {
-	struct ch347_swd_io *pswd_io;
-
-	pswd_io = ch347_get_one_swd_io();
+	struct ch347_swd_io *pswd_io = ch347_get_one_swd_io();
 	if (!pswd_io) {
 		ch347_swd_run_queue();
 		pswd_io = ch347_get_one_swd_io();
 		if (!pswd_io) {
-			LOG_DEBUG("ch347_swd_queue_cmd error ");
+			LOG_DEBUG("ch347_swd_queue_cmd error");
 			ch347_swd_context.queued_retval = ERROR_FAIL;
 			return;
 		}
@@ -1798,16 +1730,9 @@ static void ch347_swd_send_idle(uint32_t ap_delay_clk)
 
 static int ch347_swd_run_queue(void)
 {
-	LOG_DEBUG_IO("Executing %u queued transactions",
-			 ch347_swd_context.sent_cmd_count);
-	int retval, parity;
-	struct list_head *tmp, *pos;
-	uint8_t *recv_buf;
-	uint32_t recv_len, cmds_len, data;
-	struct ch347_swd_io *pswd_io;
+	LOG_DEBUG_IO("Executing %u queued transactions", ch347_swd_context.sent_cmd_count);
 	if (ch347_swd_context.queued_retval != ERROR_OK) {
-		LOG_DEBUG_IO("Skipping due to previous errors: %d",
-				 ch347_swd_context.queued_retval);
+		LOG_DEBUG_IO("Skipping due to previous errors: %d", ch347_swd_context.queued_retval);
 		goto skip;
 	}
 
@@ -1826,32 +1751,35 @@ skip_idle:
 	ch347_swd_queue_flush();
 
 	if (ch347_swd_context.queued_retval != ERROR_OK) {
-		LOG_ERROR("CH347 usb write/read failed %d", __LINE__);
+		LOG_ERROR("CH347 usb write/read failed - queued_retval");
 		goto skip;
 	}
-	recv_buf = ch347_swd_context.recv_buf;
-	recv_len = 0;
+	uint8_t *recv_buf = ch347_swd_context.recv_buf;
+	int recv_len = 0;
 	if (recv_buf[recv_len++] != CH347_CMD_SWD) { // 0XE8
 		ch347_swd_context.queued_retval = ERROR_FAIL;
-		LOG_ERROR("CH347 usb write/read failed %d", __LINE__);
+		LOG_ERROR("CH347 usb write/read failed - not CH347_CMD_SWD");
 		goto skip;
 	}
 
-	cmds_len = BUILD_UINT16(recv_buf[recv_len], recv_buf[recv_len + 1]);
+	int cmds_len = le_to_h_u16(&recv_buf[recv_len]);
 	recv_len += 2; // cmds_len
 	if ((cmds_len + CH347_CMD_HEADER) > ch347_swd_context.recv_len) {
 		ch347_swd_context.queued_retval = ERROR_FAIL;
-		LOG_ERROR("CH347 usb write/read failed %d", __LINE__);
+		LOG_ERROR("CH347 usb write/read failed - too long");
 		goto skip;
 	}
+
+	struct list_head *tmp;
+	struct list_head *pos;
+	struct ch347_swd_io *pswd_io;
 
 	list_for_each_safe(pos, tmp, &ch347_swd_context.send_cmd_head) {
 		pswd_io = list_entry(pos, struct ch347_swd_io, list_entry);
 		if (pswd_io->usb_cmd == CH347_CMD_SWD_SEQ_W) {
 			if (recv_buf[recv_len++] != CH347_CMD_SWD_SEQ_W) {
 				ch347_swd_context.queued_retval = ERROR_FAIL;
-				LOG_ERROR("CH347 usb write/read failed %d",
-					  __LINE__);
+				LOG_ERROR("CH347 usb write/read failed - not CH347_CMD_SWD_SEQ_W");
 				goto skip;
 			}
 		} else { // read/write Reg
@@ -1865,23 +1793,20 @@ skip_idle:
 				   cmd, ignore received ack */
 				check_ack = swd_cmd_returns_ack(pswd_io->cmd);
 				if (ack != SWD_ACK_OK && check_ack) {
-					ch347_swd_context.queued_retval =
-						swd_ack_to_error_code(ack);
-					LOG_ERROR("ack != SWD_ACK_OK %d",
-						  __LINE__);
+					ch347_swd_context.queued_retval = swd_ack_to_error_code(ack);
+					LOG_ERROR("ack != SWD_ACK_OK");
 					goto skip;
 				}
 				if (pswd_io->cmd & SWD_CMD_RNW) {
-					data = buf_get_u32(&recv_buf[recv_len], 0, 32);
-					parity = buf_get_u32(&recv_buf[recv_len], 32, 1);
+					int data = buf_get_u32(&recv_buf[recv_len], 0, 32);
+					int parity = buf_get_u32(&recv_buf[recv_len], 32, 1);
 					if (parity != parity_u32(data)) {
-						LOG_ERROR("SWD Read data parity mismatch %d",
-							  __LINE__);
+						LOG_ERROR("SWD Read data parity mismatch");
 						ch347_swd_context.queued_retval = ERROR_FAIL;
 						goto skip;
 					}
 
-					LOG_DEBUG_IO("%s%s %s %s reg %X = %08X\n" PRIx32,
+					LOG_DEBUG_IO("%s%s %s %s reg %X = %08X - " PRIx32,
 							 check_ack ? "" : "ack ignored ",
 							 ack == SWD_ACK_OK ? "OK" : ack == SWD_ACK_WAIT ? "WAIT" :
 								ack == SWD_ACK_FAULT  ? "FAULT" : "JUNK",
@@ -1893,9 +1818,8 @@ skip_idle:
 					if (pswd_io->dst)
 						*pswd_io->dst = data;
 				} else {
-					ch347_swd_context.queued_retval =
-						ERROR_FAIL;
-					LOG_ERROR("CH347 usb write/read failed %d", __LINE__);
+					ch347_swd_context.queued_retval = ERROR_FAIL;
+					LOG_ERROR("CH347 usb write/read failed - not SWD_CMD_RNW");
 					goto skip;
 				}
 				recv_len += 5;
@@ -1906,12 +1830,11 @@ skip_idle:
 				   cmd, ignore received ack */
 				check_ack = swd_cmd_returns_ack(pswd_io->cmd);
 				if (ack != SWD_ACK_OK && check_ack) {
-					ch347_swd_context.queued_retval =
-						swd_ack_to_error_code(ack);
-					LOG_ERROR("SWD Read data parity mismatch%d", __LINE__);
+					ch347_swd_context.queued_retval = swd_ack_to_error_code(ack);
+					LOG_ERROR("SWD Read data parity mismatch");
 					goto skip;
 				}
-				LOG_DEBUG_IO("%s%s %s %s reg %X = %08X\n" PRIx32,
+				LOG_DEBUG_IO("%s%s %s %s reg %X = %08X - " PRIx32,
 						 check_ack ? "" : "ack ignored ",
 						 ack == SWD_ACK_OK ? "OK" : ack == SWD_ACK_WAIT ? "WAIT" :
 							ack == SWD_ACK_FAULT  ? "FAULT" : "JUNK",
@@ -1921,8 +1844,7 @@ skip_idle:
 						 pswd_io->value);
 			} else {
 				ch347_swd_context.queued_retval = ERROR_FAIL;
-				LOG_ERROR("CH347 usb write/read failed %d recv_len = %d",
-					  __LINE__, recv_len);
+				LOG_ERROR("CH347 usb write/read failed recv_len = %d", recv_len);
 				goto skip;
 			}
 		}
@@ -1946,7 +1868,7 @@ skip:
 	ch347_swd_context.need_recv_len = CH347_CMD_HEADER;
 	ch347_swd_context.recv_len = 0;
 	ch347_swd_context.sent_cmd_count = 0;
-	retval = ch347_swd_context.queued_retval;
+	int retval = ch347_swd_context.queued_retval;
 	ch347_swd_context.queued_retval = ERROR_OK;
 
 	return retval;
@@ -1954,9 +1876,8 @@ skip:
 
 static void ch347_swd_queue_cmd(uint8_t cmd, uint32_t *dst, uint32_t data, uint32_t ap_delay_clk)
 {
-	struct ch347_swd_io *pswd_io;
 	if (ap_delay_clk > 255)
-		printf("%s ap_delay_clk = %d\r\n", __func__, ap_delay_clk);
+		LOG_DEBUG("ap_delay_clk = %d", ap_delay_clk);
 
 	if (ch347_swd_context.sent_cmd_count >= CH347_MAX_SEND_CMD)
 		ch347_swd_run_queue();
@@ -1964,12 +1885,12 @@ static void ch347_swd_queue_cmd(uint8_t cmd, uint32_t *dst, uint32_t data, uint3
 	if (!ch347_chk_buf_size(cmd, ap_delay_clk))
 		ch347_swd_run_queue();
 
-	pswd_io = ch347_get_one_swd_io();
+	struct ch347_swd_io *pswd_io = ch347_get_one_swd_io();
 	if (!pswd_io) {
 		ch347_swd_run_queue();
 		pswd_io = ch347_get_one_swd_io();
 		if (!pswd_io) {
-			LOG_DEBUG("%s error", __func__);
+			LOG_DEBUG("Error");
 			ch347_swd_context.queued_retval = ERROR_FAIL;
 			return;
 		}
@@ -1984,8 +1905,7 @@ static void ch347_swd_queue_cmd(uint8_t cmd, uint32_t *dst, uint32_t data, uint3
 	} else {
 		pswd_io->usb_cmd = CH347_CMD_SWD_REG_W;
 		pswd_io->value = data;
-		ch347_write_swd_reg(pswd_io->cmd, (uint8_t *)&data,
-					parity_u32(data));
+		ch347_write_swd_reg(pswd_io->cmd, (uint8_t *)&data,	parity_u32(data));
 	}
 
 	ch347_swd_context.sent_cmd_count++;
@@ -1993,43 +1913,35 @@ static void ch347_swd_queue_cmd(uint8_t cmd, uint32_t *dst, uint32_t data, uint3
 	// Insert idle cycles after AP accesses to avoid WAIT
 	if (cmd & SWD_CMD_APNDP) {
 		if (ap_delay_clk == 0)
-			printf("ap_delay_clk == 0");
+			LOG_DEBUG("ap_delay_clk == 0");
 		ch347_swd_send_idle(ap_delay_clk);
 	}
 }
 
 static int ch347_swd_switch_seq(enum swd_special_seq seq)
 {
-	printf("%s %d \r\n", __func__, seq);
 	switch (seq) {
 	case LINE_RESET:
 		LOG_DEBUG("SWD line reset");
-		return ch347_swd_switch_out(seq, swd_seq_line_reset,
-						swd_seq_line_reset_len);
+		return ch347_swd_switch_out(seq, swd_seq_line_reset, swd_seq_line_reset_len);
 	case JTAG_TO_SWD:
 		LOG_DEBUG("JTAG-to-SWD");
-		return ch347_swd_switch_out(seq, swd_seq_jtag_to_swd,
-						swd_seq_jtag_to_swd_len);
+		return ch347_swd_switch_out(seq, swd_seq_jtag_to_swd, swd_seq_jtag_to_swd_len);
 	case JTAG_TO_DORMANT:
 		LOG_DEBUG("JTAG-to-DORMANT");
-		return ch347_swd_switch_out(seq, swd_seq_jtag_to_dormant,
-						swd_seq_jtag_to_dormant_len);
+		return ch347_swd_switch_out(seq, swd_seq_jtag_to_dormant, swd_seq_jtag_to_dormant_len);
 	case SWD_TO_JTAG:
 		LOG_DEBUG("SWD-to-JTAG");
-		return ch347_swd_switch_out(seq, swd_seq_swd_to_jtag,
-						swd_seq_swd_to_jtag_len);
+		return ch347_swd_switch_out(seq, swd_seq_swd_to_jtag, swd_seq_swd_to_jtag_len);
 	case SWD_TO_DORMANT:
 		LOG_DEBUG("SWD-to-DORMANT");
-		return ch347_swd_switch_out(seq, swd_seq_swd_to_dormant,
-						swd_seq_swd_to_dormant_len);
+		return ch347_swd_switch_out(seq, swd_seq_swd_to_dormant, swd_seq_swd_to_dormant_len);
 	case DORMANT_TO_SWD:
 		LOG_DEBUG("DORMANT-to-SWD");
-		return ch347_swd_switch_out(seq, swd_seq_dormant_to_swd,
-						swd_seq_dormant_to_swd_len);
+		return ch347_swd_switch_out(seq, swd_seq_dormant_to_swd, swd_seq_dormant_to_swd_len);
 	case DORMANT_TO_JTAG:
 		LOG_DEBUG("DORMANT-to-JTAG");
-		return ch347_swd_switch_out(seq, swd_seq_dormant_to_jtag,
-						swd_seq_dormant_to_jtag_len);
+		return ch347_swd_switch_out(seq, swd_seq_dormant_to_jtag, swd_seq_dormant_to_jtag_len);
 	default:
 		LOG_ERROR("Sequence %d not supported", seq);
 		return ERROR_FAIL;
