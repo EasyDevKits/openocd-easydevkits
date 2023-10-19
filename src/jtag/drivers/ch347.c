@@ -213,6 +213,7 @@ static bool ch347_open_device(void)
 	int err_code = libusb_claim_interface(ch347_handle, CH347_MPHSI_INTERFACE);
 	if (err_code != ERROR_OK) {
 		LOG_ERROR("CH347 unable to claim interface: %s", libusb_error_name(err_code));
+		jtag_libusb_close(ch347_handle);
 		return false;
 	}
 
@@ -222,6 +223,7 @@ static bool ch347_open_device(void)
 				VENDOR_VERSION, 0, 0, &firmware_version, sizeof(firmware_version),
 				USB_WRITE_TIMEOUT, NULL) != ERROR_OK) {
 		LOG_ERROR("CH347 unable to get firmware version");
+		jtag_libusb_close(ch347_handle);
 		return false;
 	}
 
