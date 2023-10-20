@@ -76,7 +76,6 @@
 												pin numbers are for CH347T */
 #define VENDOR_VERSION					0x5F // for getting the chip version
 
-
 #define HW_TDO_BUF_SIZE					4096
 #define SF_PACKET_BUF_SIZE				51200 // Command packet length
 #define UCMDPKT_DATA_MAX_BYTES_USBHS	507   /* The data length contained in each command packet
@@ -252,7 +251,7 @@ static bool ch347_open_device(void)
 		firmware_version);
 
 	if (ch347_device_descriptor.bcdDevice < BYTEWISE_MODE_VERSION) {
-		LOG_INFO("CH347 old version of the chip, JTAG only working in bitwise mode. For bytewise mode at least version %X.%2X is needed.",
+		LOG_INFO("CH347 old version of the chip, JTAG only working in bitwise mode. For bytewise mode at least version %X.%X is needed.",
 			(BYTEWISE_MODE_VERSION >> 8) & 0xFF,
 			BYTEWISE_MODE_VERSION & 0xFF);
 		ch347.write_read_fn = ch347_write_read_bitwise;
@@ -1325,6 +1324,15 @@ static bool ch347_jtag_init(uint8_t clock_index)
 	ch347.pack_size = ch347_check_speed(0x09) ? STANDARD_PACK : LARGER_PACK;
 	if (ch347.pack_size == STANDARD_PACK)
 		return (clock_index - 2 < 0) ? ch347_check_speed(0) : ch347_check_speed(clock_index - 2);
+
+	/* TODO: Need to get also the LARGER_PACK mode running,
+		but currently ch347_write_read is not working correctly with LARGER_PACK
+		it doesn't read any data. But fortunately it is possible to work
+		with the STANDARD_PACK also with a device that supports LARGER_PACK */
+	LOG_INFO("CH347 device supports LARGER_PACK mode. "
+				"But the driver ist only working correctly for STANDARD_PACK mode. "
+				"Switching to STANDARD_PACK mode.");
+	ch347.pack_size = STANDARD_PACK;
 
 	return ch347_check_speed(clock_index);
 }
