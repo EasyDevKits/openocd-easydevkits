@@ -186,10 +186,10 @@ struct ch347_info {
 								due to a bug of the chip; depends on BYTEWISE_MODE_VERSION */
 	enum pack_size pack_size; // see: pack_size for explanation
 
-	// a "scratch pad" where we record all bytes for one command
-	uint8_t scratch_pad_cmd_type; // command type
-	uint8_t scratch_pad[UCMDPKT_DATA_MAX_BYTES_USBHS]; // scratch pad buffer
-	int scratch_pad_idx; // current index in scratch pad
+	// a "scratchpad" where we record all bytes for one command
+	uint8_t scratchpad_cmd_type; // command type
+	uint8_t scratchpad[UCMDPKT_DATA_MAX_BYTES_USBHS]; // scratchpad buffer
+	int scratchpad_idx; // current index in scratchpad
 
 	// after a command is complete it will be stored for later processing
 	struct list_head cmd_queue;
@@ -346,35 +346,35 @@ static void ch347_cmd_calc_reads(struct ch347_cmd *cmd)
 }
 
 /**
- * @brief copy the scratch pad content into a new command in the command queue
+ * @brief copy the scratchpad content into a new command in the command queue
  *
  * @param scan_fields array of scan_field's for data from the device
  * @param scan_fields_len array length
  */
-static void ch347_cmd_from_scratch_pad(void)
+static void ch347_cmd_from_scratchpad(void)
 {
 	// nothing to do if no bytes are recorded
-	if (!ch347.scratch_pad_idx)
+	if (!ch347.scratchpad_idx)
 		return;
 
 	// malloc for the command and data bytes
 	struct ch347_cmd *cmd = malloc(sizeof(struct ch347_cmd));
-	cmd->write_data = malloc(ch347.scratch_pad_idx);
+	cmd->write_data = malloc(ch347.scratchpad_idx);
 	if (!cmd || !cmd->write_data) {
 		LOG_ERROR("malloc failed");
 		return;
 	}
 
 	// copy data, calculate the reads and add to the command queue
-	cmd->type = ch347.scratch_pad_cmd_type;
-	cmd->write_data_len = ch347.scratch_pad_idx;
-	memcpy(cmd->write_data, ch347.scratch_pad, ch347.scratch_pad_idx);
+	cmd->type = ch347.scratchpad_cmd_type;
+	cmd->write_data_len = ch347.scratchpad_idx;
+	memcpy(cmd->write_data, ch347.scratchpad, ch347.scratchpad_idx);
 	ch347_cmd_calc_reads(cmd);
 	list_add_tail(&cmd->queue, &ch347.cmd_queue);
 
-	// cleanup the scratch pad for the next command
-	ch347.scratch_pad_cmd_type = 0;
-	ch347.scratch_pad_idx = 0;
+	// cleanup the scratchpad for the next command
+	ch347.scratchpad_cmd_type = 0;
+	ch347.scratchpad_idx = 0;
 }
 
 /**
@@ -502,7 +502,7 @@ static void ch347_scan_data_to_fields(uint8_t *decoded_buf, int decoded_buf_len)
 static void ch347_cmd_transmit_queue(void)
 {
 	// queue last command
-	ch347_cmd_from_scratch_pad();
+	ch347_cmd_from_scratchpad();
 
 	if (list_empty(&ch347.cmd_queue))
 		return;
@@ -628,7 +628,7 @@ static void ch347_cmd_transmit_queue(void)
 }
 
 /**
- * @brief starts the next command in the scratch pad. If it's the same command type
+ * @brief starts the next command in the scratchpad. If it's the same command type
  * it can concat the data bytes. no need to make a new command for this case
  *
  * @param type command type
@@ -636,11 +636,11 @@ static void ch347_cmd_transmit_queue(void)
 static void ch347_cmd_start_next(uint8_t type)
 {
 	// different command type or non chainable command? (GPIO commands can't be concat)
-	uint8_t prev_type = ch347.scratch_pad_cmd_type;
+	uint8_t prev_type = ch347.scratchpad_cmd_type;
 	if (prev_type != type || ch347_is_single_cmd_type(type)) {
-		// something written in the scratch pad? => store it as command
-		if (prev_type != 0 && ch347.scratch_pad_idx > 0) {
-			ch347_cmd_from_scratch_pad();
+		// something written in the scratchpad? => store it as command
+		if (prev_type != 0 && ch347.scratchpad_idx > 0) {
+			ch347_cmd_from_scratchpad();
 			/* if the last queued command is not chainable we should send it immediately
 				because e.g. the GPIO command can't be combined with any other command */
 			if (ch347_is_single_cmd_type(prev_type))
@@ -653,7 +653,7 @@ static void ch347_cmd_start_next(uint8_t type)
 			ch347_cmd_transmit_queue();
 
 		// store the next command type
-		ch347.scratch_pad_cmd_type = type;
+		ch347.scratchpad_cmd_type = type;
 	}
 }
 
@@ -694,75 +694,75 @@ static uint8_t ch347_single_read_get_byte(int read_buf_idx)
 }
 
 /**
- * @brief checks if the scratch pad is full. If it's full the function creates
+ * @brief checks if the scratchpad is full. If it's full the function creates
  * a command from it and puts it into the command queue
  */
-static void ch347_scratch_pad_check_full(void)
+static void ch347_scratchpad_check_full(void)
 {
 	// if full create a new command in the queue
-	if (ch347.scratch_pad_idx == UCMDPKT_DATA_MAX_BYTES_USBHS) {
-		uint8_t type = ch347.scratch_pad_cmd_type;
-		ch347_cmd_from_scratch_pad();
-		ch347.scratch_pad_cmd_type = type;
+	if (ch347.scratchpad_idx == UCMDPKT_DATA_MAX_BYTES_USBHS) {
+		uint8_t type = ch347.scratchpad_cmd_type;
+		ch347_cmd_from_scratchpad();
+		ch347.scratchpad_cmd_type = type;
 	}
 }
 
 /**
- * @brief adds one byte to the scratch pad
- * if scratch pad is full after this byte the command will be created from the
- * scratch pad and the scratch pad is cleared for the next command
+ * @brief adds one byte to the scratchpad
+ * if scratchpad is full after this byte the command will be created from the
+ * scratchpad and the scratchpad is cleared for the next command
  *
  * @param byte add this byte
  */
-static void ch347_scratch_pad_add_byte(uint8_t byte)
+static void ch347_scratchpad_add_byte(uint8_t byte)
 {
-	if (ch347.scratch_pad_cmd_type == 0) {
+	if (ch347.scratchpad_cmd_type == 0) {
 		LOG_ERROR("call ch347_next_cmd first!");
 		return;
 	}
-	ch347.scratch_pad[ch347.scratch_pad_idx++] = byte;
-	ch347_scratch_pad_check_full();
+	ch347.scratchpad[ch347.scratchpad_idx++] = byte;
+	ch347_scratchpad_check_full();
 }
 
 /**
- * @brief adds the output pin byte to the scratch pad
- * if scratch pad is full after this byte the command will be created from the
- * scratch pad and the scratch pad is cleared for the next command
+ * @brief adds the output pin byte to the scratchpad
+ * if scratchpad is full after this byte the command will be created from the
+ * scratchpad and the scratchpad is cleared for the next command
  */
-static void ch347_scratch_pad_add_pin_byte(void)
+static void ch347_scratchpad_add_pin_byte(void)
 {
-	ch347_scratch_pad_add_byte(ch347.tms_pin | ch347.tdi_pin | ch347.tck_pin | ch347.trst_pin);
+	ch347_scratchpad_add_byte(ch347.tms_pin | ch347.tdi_pin | ch347.tck_pin | ch347.trst_pin);
 }
 
 /**
- * @brief adds bytes from a buffer to the scratch pad
- * if scratch pad is full after this byte the command will be created from the
- * scratch pad and the scratch pad is cleared for the next command
+ * @brief adds bytes from a buffer to the scratchpad
+ * if scratchpad is full after this byte the command will be created from the
+ * scratchpad and the scratchpad is cleared for the next command
  *
  * @param bytes add this bytes
  * @param count byte count
 */
-static void ch347_scratch_pad_add_bytes(uint8_t *bytes, int count)
+static void ch347_scratchpad_add_bytes(uint8_t *bytes, int count)
 {
-	if (ch347.scratch_pad_cmd_type == 0) {
+	if (ch347.scratchpad_cmd_type == 0) {
 		LOG_ERROR("call ch347_next_cmd first!");
 		return;
 	}
 
-	// enough space in scratch pad?
-	if (ch347.scratch_pad_idx + count <= UCMDPKT_DATA_MAX_BYTES_USBHS) {
+	// enough space in scratchpad?
+	if (ch347.scratchpad_idx + count <= UCMDPKT_DATA_MAX_BYTES_USBHS) {
 		if (bytes)
-			memcpy(&ch347.scratch_pad[ch347.scratch_pad_idx], bytes, count);
+			memcpy(&ch347.scratchpad[ch347.scratchpad_idx], bytes, count);
 		else
-			memset(&ch347.scratch_pad[ch347.scratch_pad_idx], 0, count);
-		ch347.scratch_pad_idx += count;
-		ch347_scratch_pad_check_full();
+			memset(&ch347.scratchpad[ch347.scratchpad_idx], 0, count);
+		ch347.scratchpad_idx += count;
+		ch347_scratchpad_check_full();
 	} else {
 		// make two chunks and recursivly call this function again
-		int bytes_to_store = UCMDPKT_DATA_MAX_BYTES_USBHS - ch347.scratch_pad_idx;
+		int bytes_to_store = UCMDPKT_DATA_MAX_BYTES_USBHS - ch347.scratchpad_idx;
 		int bytes_remaining = count - bytes_to_store;
-		ch347_scratch_pad_add_bytes(bytes, bytes_to_store);
-		ch347_scratch_pad_add_bytes(&bytes[bytes_to_store], bytes_remaining);
+		ch347_scratchpad_add_bytes(bytes, bytes_to_store);
+		ch347_scratchpad_add_bytes(&bytes[bytes_to_store], bytes_remaining);
 	}
 }
 
@@ -772,22 +772,22 @@ static void ch347_scratch_pad_add_bytes(uint8_t *bytes, int count)
  *
  * @param tms TMS value to be changed; true = output TMS high; false = output TMS low
  */
-static void ch347_scratch_pad_add_clock_tms(bool tms)
+static void ch347_scratchpad_add_clock_tms(bool tms)
 {
 	ch347.tms_pin = tms ? TMS_H : TMS_L;
 	ch347.tck_pin = TCK_L;
-	ch347_scratch_pad_add_pin_byte();
+	ch347_scratchpad_add_pin_byte();
 	ch347.tck_pin = TCK_H;
-	ch347_scratch_pad_add_pin_byte();
+	ch347_scratchpad_add_pin_byte();
 }
 
 /**
  * @brief Function to ensure that the clock is in a low state
  */
-static void ch347_scratch_pad_add_idle_clock(void)
+static void ch347_scratchpad_add_idle_clock(void)
 {
 	ch347.tck_pin = TCK_L;
-	ch347_scratch_pad_add_pin_byte();
+	ch347_scratchpad_add_pin_byte();
 }
 
 /**
@@ -797,14 +797,14 @@ static void ch347_scratch_pad_add_idle_clock(void)
  * @param step The number of bit values that need to be read from the tms_value value
  * @param skip Count from the skip bit of tms_value to step
  */
-static void ch347_scratch_pad_add_tms_change(const uint8_t *tms_value, int step, int skip)
+static void ch347_scratchpad_add_tms_change(const uint8_t *tms_value, int step, int skip)
 {
 	LOG_DEBUG_IO("TMS Value: %02x..., step = %d, skip = %d", tms_value[0], step, skip);
 
 	ch347_cmd_start_next(CH347_CMD_JTAG_BIT_OP);
 	for (int i = skip; i < step; i++)
-		ch347_scratch_pad_add_clock_tms((tms_value[i / 8] >> (i % 8)) & 0x01);
-	ch347_scratch_pad_add_idle_clock();
+		ch347_scratchpad_add_clock_tms((tms_value[i / 8] >> (i % 8)) & 0x01);
+	ch347_scratchpad_add_idle_clock();
 }
 
 
@@ -813,19 +813,19 @@ static void ch347_scratch_pad_add_tms_change(const uint8_t *tms_value, int step,
  *
  * @param cmd Upper layer transfer command parameters
  */
-static void ch347_scratch_pad_add_move_path(struct pathmove_command *cmd)
+static void ch347_scratchpad_add_move_path(struct pathmove_command *cmd)
 {
 	LOG_DEBUG_IO("num_states=%d, last_state=%d", cmd->num_states, cmd->path[cmd->num_states - 1]);
 
 	ch347_cmd_start_next(CH347_CMD_JTAG_BIT_OP);
 	for (int i = 0; i < cmd->num_states; i++) {
 		if (tap_state_transition(tap_get_state(), false) ==	cmd->path[i])
-			ch347_scratch_pad_add_clock_tms(0);
+			ch347_scratchpad_add_clock_tms(0);
 		if (tap_state_transition(tap_get_state(), true) == cmd->path[i])
-			ch347_scratch_pad_add_clock_tms(1);
+			ch347_scratchpad_add_clock_tms(1);
 		tap_set_state(cmd->path[i]);
 	}
-	ch347_scratch_pad_add_idle_clock();
+	ch347_scratchpad_add_idle_clock();
 }
 
 /**
@@ -834,7 +834,7 @@ static void ch347_scratch_pad_add_move_path(struct pathmove_command *cmd)
  * @param state Pre switch target path
  * @param skip Number of digits to skip
  */
-static void ch347_scratch_pad_add_move_state(tap_state_t state, int skip)
+static void ch347_scratchpad_add_move_state(tap_state_t state, int skip)
 {
 	uint8_t tms_scan;
 	int tms_len;
@@ -845,7 +845,7 @@ static void ch347_scratch_pad_add_move_state(tap_state_t state, int skip)
 		return;
 	tms_scan = tap_get_tms_path(tap_get_state(), state);
 	tms_len = tap_get_tms_path_len(tap_get_state(), state);
-	ch347_scratch_pad_add_tms_change(&tms_scan, tms_len, skip);
+	ch347_scratchpad_add_tms_change(&tms_scan, tms_len, skip);
 	tap_set_state(state);
 }
 
@@ -857,7 +857,7 @@ static void ch347_scratch_pad_add_move_state(tap_state_t state, int skip)
  * @param bits_len Incoming data length in bits
  * @param scan The transmission method of incoming data to determine whether to perform data reading
  */
-static void ch347_scratch_pad_add_write_read(struct scan_command *cmd, uint8_t *bits, int bits_len, enum scan_type scan)
+static void ch347_scratchpad_add_write_read(struct scan_command *cmd, uint8_t *bits, int bits_len, enum scan_type scan)
 {
 	// the bits and bytes to transfer
 	int byte_count = bits_len / 8;
@@ -883,9 +883,9 @@ static void ch347_scratch_pad_add_write_read(struct scan_command *cmd, uint8_t *
 		// start the next cmd and copy the data out bytes to it
 		ch347_cmd_start_next(is_read ? CH347_CMD_JTAG_DATA_SHIFT_RD : CH347_CMD_JTAG_DATA_SHIFT);
 		if (bits)
-			ch347_scratch_pad_add_bytes(bits, byte_count);
+			ch347_scratchpad_add_bytes(bits, byte_count);
 		else
-			ch347_scratch_pad_add_bytes(NULL, byte_count);
+			ch347_scratchpad_add_bytes(NULL, byte_count);
 	}
 
 	// bits are always need to send; no possibility to not send bits
@@ -903,18 +903,18 @@ static void ch347_scratch_pad_add_write_read(struct scan_command *cmd, uint8_t *
 			ch347.tms_pin = TMS_H;
 
 		ch347.tck_pin = TCK_L;
-		ch347_scratch_pad_add_pin_byte();
+		ch347_scratchpad_add_pin_byte();
 		ch347.tck_pin = TCK_H;
-		ch347_scratch_pad_add_pin_byte();
+		ch347_scratchpad_add_pin_byte();
 		/* cut the package after each MAX_BITS_PER_BIT_OP bits because it
 			needs a dividable by 8 bits package */
 		if (i > 0 && (i + 1) % MAX_BITS_PER_BIT_OP == 0) {
-			ch347_cmd_from_scratch_pad();
+			ch347_cmd_from_scratchpad();
 			ch347_cmd_start_next(is_read ? CH347_CMD_JTAG_BIT_OP_RD : CH347_CMD_JTAG_BIT_OP);
 		}
 	}
 	// one TCK_L after the last bit
-	ch347_scratch_pad_add_idle_clock();
+	ch347_scratchpad_add_idle_clock();
 
 	// if read is involed we need to queue the scan fields
 	if (is_read)
@@ -927,17 +927,17 @@ static void ch347_scratch_pad_add_write_read(struct scan_command *cmd, uint8_t *
  * @param cycles
  * @param state
  */
-static void ch347_scratch_pad_add_run_test(int cycles, tap_state_t state)
+static void ch347_scratchpad_add_run_test(int cycles, tap_state_t state)
 {
 	LOG_DEBUG_IO("cycles=%d, end_state=%d", cycles, state);
 	if (tap_get_state() != TAP_IDLE)
-		ch347_scratch_pad_add_move_state(TAP_IDLE, 0);
+		ch347_scratchpad_add_move_state(TAP_IDLE, 0);
 
 	uint8_t tms_value = 0;
-	ch347_scratch_pad_add_tms_change(&tms_value, cycles, 1);
+	ch347_scratchpad_add_tms_change(&tms_value, cycles, 1);
 
-	ch347_scratch_pad_add_write_read(NULL, NULL, cycles, SCAN_OUT);
-	ch347_scratch_pad_add_move_state(state, 0);
+	ch347_scratchpad_add_write_read(NULL, NULL, cycles, SCAN_OUT);
+	ch347_scratchpad_add_move_state(state, 0);
 }
 
 /**
@@ -946,7 +946,7 @@ static void ch347_scratch_pad_add_run_test(int cycles, tap_state_t state)
  * @param cmd Upper layer transfer command parameters
  * @return Always ERROR_OK
  */
-static int ch347_scratch_pad_add_scan(struct scan_command *cmd)
+static int ch347_scratchpad_add_scan(struct scan_command *cmd)
 {
 	static const char *const type2str[] = {"", "SCAN_IN", "SCAN_OUT", "SCAN_IO"};
 
@@ -956,9 +956,9 @@ static int ch347_scratch_pad_add_scan(struct scan_command *cmd)
 
 	// add a move to IRSHIFT or DRSHIFT state
 	if (cmd->ir_scan)
-		ch347_scratch_pad_add_move_state(TAP_IRSHIFT, 0);
+		ch347_scratchpad_add_move_state(TAP_IRSHIFT, 0);
 	else
-		ch347_scratch_pad_add_move_state(TAP_DRSHIFT, 0);
+		ch347_scratchpad_add_move_state(TAP_DRSHIFT, 0);
 
 	if (LOG_LEVEL_IS(LOG_LVL_DEBUG_IO)) {
 		char *log_buf = buf_to_hex_str(buf, scan_bits);
@@ -969,11 +969,11 @@ static int ch347_scratch_pad_add_scan(struct scan_command *cmd)
 		free(log_buf);
 	}
 
-	ch347_scratch_pad_add_write_read(cmd, buf, scan_bits, type);
+	ch347_scratchpad_add_write_read(cmd, buf, scan_bits, type);
 	free(buf);
 
 	// add a move to the final state
-	ch347_scratch_pad_add_move_state(cmd->end_state, 1);
+	ch347_scratchpad_add_move_state(cmd->end_state, 1);
 
 	return ERROR_OK;
 }
@@ -993,7 +993,7 @@ static void ch347_gpio_set(int gpio, bool data)
 		bits 5 and 4 for pin direction output
 		bit 3 is the data bit */
 	gpios[gpio] = data == 0 ? 0xF0 : 0xF8;
-	ch347_scratch_pad_add_bytes(gpios, GPIO_CNT);
+	ch347_scratchpad_add_bytes(gpios, GPIO_CNT);
 	// check in the read if the bit is set/cleared correctly
 	if ((ch347_single_read_get_byte(gpio) & 0x40) >> 6 != data) {
 		LOG_ERROR("Output not set.");
@@ -1022,7 +1022,7 @@ static int ch347_trst_set(bool status)
 {
 	ch347_cmd_start_next(CH347_CMD_JTAG_BIT_OP);
 	ch347.trst_pin = status ? TRST_H : TRST_L;
-	ch347_scratch_pad_add_pin_byte();
+	ch347_scratchpad_add_pin_byte();
 	ch347_cmd_transmit_queue();
 	return ERROR_OK;
 }
@@ -1051,8 +1051,8 @@ static int ch347_reset_assert(int trst, int srst)
 
 	ch347_cmd_start_next(CH347_CMD_JTAG_BIT_OP);
 	ch347.trst_pin = trst ? TRST_L : TRST_H;
-	ch347_scratch_pad_add_pin_byte();
-	ch347_scratch_pad_add_idle_clock();
+	ch347_scratchpad_add_pin_byte();
+	ch347_scratchpad_add_idle_clock();
 	ch347_cmd_transmit_queue();
 	return ERROR_OK;
 }
@@ -1085,26 +1085,26 @@ static int ch347_execute_queue(void)
 		 cmd = cmd->next) {
 		switch (cmd->type) {
 		case JTAG_RUNTEST:
-			ch347_scratch_pad_add_run_test(cmd->cmd.runtest->num_cycles,
+			ch347_scratchpad_add_run_test(cmd->cmd.runtest->num_cycles,
 					  cmd->cmd.runtest->end_state);
 			break;
 		case JTAG_STABLECLOCKS:
-			ch347_scratch_pad_add_write_read(NULL, NULL, cmd->cmd.stableclocks->num_cycles, SCAN_OUT);
+			ch347_scratchpad_add_write_read(NULL, NULL, cmd->cmd.stableclocks->num_cycles, SCAN_OUT);
 			break;
 		case JTAG_TLR_RESET:
-			ch347_scratch_pad_add_move_state(cmd->cmd.statemove->end_state, 0);
+			ch347_scratchpad_add_move_state(cmd->cmd.statemove->end_state, 0);
 			break;
 		case JTAG_PATHMOVE:
-			ch347_scratch_pad_add_move_path(cmd->cmd.pathmove);
+			ch347_scratchpad_add_move_path(cmd->cmd.pathmove);
 			break;
 		case JTAG_TMS:
-			ch347_scratch_pad_add_tms_change(cmd->cmd.tms->bits, cmd->cmd.tms->num_bits, 0);
+			ch347_scratchpad_add_tms_change(cmd->cmd.tms->bits, cmd->cmd.tms->num_bits, 0);
 			break;
 		case JTAG_SLEEP:
 			ch347_sleep(cmd->cmd.sleep->us);
 			break;
 		case JTAG_SCAN:
-			ret = ch347_scratch_pad_add_scan(cmd->cmd.scan);
+			ret = ch347_scratchpad_add_scan(cmd->cmd.scan);
 			break;
 		default:
 			LOG_ERROR("BUG: unknown JTAG command type 0x%X", cmd->type);
@@ -1218,10 +1218,10 @@ static int ch347_quit(void)
 static bool ch347_adapter_speed_set(uint8_t clock_index)
 {
 	ch347_cmd_start_next(CH347_CMD_JTAG_INIT);
-	ch347_scratch_pad_add_byte(0);
-	ch347_scratch_pad_add_byte(clock_index);
+	ch347_scratchpad_add_byte(0);
+	ch347_scratchpad_add_byte(clock_index);
 	for (int i = 0; i < 4; i++)
-		ch347_scratch_pad_add_pin_byte();
+		ch347_scratchpad_add_pin_byte();
 	return ch347_single_read_get_byte(0) == 0;
 }
 
@@ -1299,10 +1299,14 @@ static int ch347_speed_get_index(int khz, int *speed_idx)
 
 	// too high! => use max possible speed
 	if (idx == -1) {
-		LOG_INFO("Speed %d MHz is higher than highest speed of %d MHz. Using %d Mhz!",
-			khz / 1000, speeds[length - 1] / 1000, speeds[length - 1] / 1000);
+		LOG_INFO("Speed %d kHz is higher than highest speed of %d kHz. Using %d khz!",
+			khz, speeds[length - 1], speeds[length - 1]);
 		idx = length - 1;
+	} else if (speeds[length - 1] != khz) {
+		LOG_INFO("Requested speed of %d kHz is not possible. Using the next higher speed of %d kHz!",
+			khz, speeds[length - 1]);
 	}
+
 
 	*speed_idx = idx;
 	return ERROR_OK;
