@@ -1304,7 +1304,7 @@ static int ch347_speed_get_index(int khz, int *speed_idx)
 		idx = length - 1;
 	} else if (speeds[length - 1] != khz) {
 		LOG_INFO("Requested speed of %d kHz is not possible. Using the next higher speed of %d kHz!",
-			khz, speeds[length - 1]);
+			khz, speeds[idx]);
 	}
 
 
