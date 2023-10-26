@@ -362,6 +362,8 @@ static void ch347_cmd_from_scratchpad(void)
 	cmd->write_data = malloc(ch347.scratchpad_idx);
 	if (!cmd || !cmd->write_data) {
 		LOG_ERROR("malloc failed");
+		if (cmd)
+			free(cmd);
 		return;
 	}
 
@@ -418,8 +420,10 @@ static void ch347_read_scan(uint8_t *decoded_buf, int decoded_buf_len, int raw_r
 		}
 
 		switch (type) {
+		case CH347_CMD_GPIO:
+		case CH347_CMD_JTAG_INIT:
 		case CH347_CMD_JTAG_DATA_SHIFT_RD:
-			// for CH347_CMD_JTAG_DATA_SHIFT_RD copy the data bytes
+			// for all bytewise commands: copy the data bytes
 			memcpy(&decoded_buf[decoded_buf_idx], &read_buf[rd_idx], data_len);
 			decoded_buf_idx += data_len;
 			rd_idx += data_len;
@@ -435,7 +439,6 @@ static void ch347_read_scan(uint8_t *decoded_buf, int decoded_buf_len, int raw_r
 			rd_idx += data_len;
 			decoded_buf_idx += DIV_ROUND_UP(data_len, 8);
 			break;
-		// TODO: need to add GPIO and INIT commands
 		default:
 			LOG_ERROR("CH347 read command fail");
 			free(read_buf);
@@ -493,6 +496,17 @@ static void ch347_scan_data_to_fields(uint8_t *decoded_buf, int decoded_buf_len)
 		byte_offset = DIV_ROUND_UP(bit_offset, 8);
 		bit_offset = byte_offset * 8;
 	}
+
+	// if not all bytes are transferred: put the rest into single_read buffer
+	if (byte_offset < decoded_buf_len) {
+		ch347.singe_read_len = decoded_buf_len - byte_offset;
+		LOG_DEBUG("single read of %d bytes", ch347.singe_read_len);
+		if (ch347.singe_read_len > CH347_SINGLE_CMD_MAX_READ) {
+			LOG_ERROR("Can't read more than %d bytes for a single command!", CH347_SINGLE_CMD_MAX_READ);
+			ch347.singe_read_len = CH347_SINGLE_CMD_MAX_READ;
+		}
+		memcpy(ch347.single_read, &decoded_buf[byte_offset], ch347.singe_read_len);
+	}
 }
 
 /**
@@ -512,7 +526,8 @@ static void ch347_cmd_transmit_queue(void)
 	int decoded_buf_len = 0;
 	list_for_each_entry(cmd, &ch347.cmd_queue, queue)
 		if (cmd->read_len > 0)
-			decoded_buf_len += DIV_ROUND_UP(cmd->tdo_bit_count, 8);
+			decoded_buf_len += ch347_is_single_cmd_type(cmd->type) ?
+				cmd->read_len : DIV_ROUND_UP(cmd->tdo_bit_count, 8);
 
 	// create the buffer for all decoded bytes
 	uint8_t *decoded_buf = NULL;
@@ -544,6 +559,14 @@ static void ch347_cmd_transmit_queue(void)
 			bytes_to_write = total_len;
 		}
 
+		// sanity checks
+		if (!last_cmd || bytes_to_write == 0) {
+			LOG_ERROR("Nothing to send!");
+			if (decoded_buf)
+				free(decoded_buf);
+			return;
+		}
+
 		// create the write buffer
 		uint8_t *write_buf = malloc(bytes_to_write);
 		if (!write_buf) {
@@ -557,7 +580,6 @@ static void ch347_cmd_transmit_queue(void)
 		int bytes_to_read = 0;
 		int current_decoded_buf_len = 0;
 		struct ch347_cmd *tmp;
-		int single_cmd_read_data_len = 0;
 
 		list_for_each_entry_safe(cmd, tmp, &ch347.cmd_queue, queue) {
 			// copy command to buffer
@@ -569,12 +591,8 @@ static void ch347_cmd_transmit_queue(void)
 			// need to read something back?
 			if (cmd->read_len > 0) {
 				bytes_to_read += CH347_CMD_HEADER + cmd->read_len;
-				current_decoded_buf_len += DIV_ROUND_UP(cmd->tdo_bit_count, 8);
-				if (ch347_is_single_cmd_type(cmd->type)) {
-					single_cmd_read_data_len = cmd->read_len;
-					if (single_cmd_read_data_len > CH347_SINGLE_CMD_MAX_READ)
-						single_cmd_read_data_len = CH347_SINGLE_CMD_MAX_READ;
-				}
+				current_decoded_buf_len += ch347_is_single_cmd_type(cmd->type) ?
+					cmd->read_len : DIV_ROUND_UP(cmd->tdo_bit_count, 8);
 			}
 
 			// remember if this is the last command to send in this round trip
@@ -601,27 +619,19 @@ static void ch347_cmd_transmit_queue(void)
 		if (!bytes_to_read)
 			continue;
 
-		if (single_cmd_read_data_len > 0) {
-			uint8_t read_buf[CH347_CMD_HEADER + CH347_SINGLE_CMD_MAX_READ];
-			if (ch347_read_data(read_buf, &bytes_to_read) != ERROR_OK)
-				return;
-			memcpy(ch347.single_read, &read_buf[CH347_CMD_HEADER], single_cmd_read_data_len);
-			ch347.singe_read_len = single_cmd_read_data_len;
+		// Need only to execute a read without decoding the data to make the CH347 happy?
+		if (!current_decoded_buf_len) {
+			// read but don't decode anything
+			ch347_read_scan(NULL, 0, bytes_to_read);
 		} else {
-			// Need only to execute a read without decoding the data to make the CH347 happy?
-			if (!current_decoded_buf_len) {
-				// read but don't decode anything
-				ch347_read_scan(NULL, 0, bytes_to_read);
-			} else {
-				ch347_read_scan(&decoded_buf[decoded_buf_idx], current_decoded_buf_len, bytes_to_read);
-				decoded_buf_idx += current_decoded_buf_len;
-			}
+			ch347_read_scan(&decoded_buf[decoded_buf_idx], current_decoded_buf_len, bytes_to_read);
+			decoded_buf_idx += current_decoded_buf_len;
 		}
 	}
 
 	// something decoded from the data read back from CH347?
 	if (decoded_buf) {
-		// put the decoded data into the scan fields
+		// put the decoded data into the scan fields or single_read buffer
 		ch347_scan_data_to_fields(decoded_buf, decoded_buf_len);
 		free(decoded_buf);
 	}
