@@ -54,17 +54,13 @@
 #include <time.h>
 #include <unistd.h>
 
-#define JTAGIO_STA_OUT_TDI				(0x10)
-#define JTAGIO_STA_OUT_TMS				(0x02)
-#define JTAGIO_STA_OUT_TCK				(0x01)
-#define JTAGIO_STA_OUT_TRST				(0x20)
-#define TDI_H							JTAGIO_STA_OUT_TDI
+#define TDI_H							BIT(4)
 #define TDI_L							0
-#define TMS_H							JTAGIO_STA_OUT_TMS
+#define TMS_H							BIT(1)
 #define TMS_L							0
-#define TCK_H							JTAGIO_STA_OUT_TCK
+#define TCK_H							BIT(0)
 #define TCK_L							0
-#define TRST_H							JTAGIO_STA_OUT_TRST
+#define TRST_H							BIT(5)
 #define TRST_L							0
 #define LED_ON							1
 #define LED_OFF							0
@@ -74,7 +70,7 @@
 												GPIO5 (Pin9 / TRST) and GPIO6 (Pin2 / CTS1) are possible
 												Tested only with CH347T not CH347F chip
 												pin numbers are for CH347T */
-#define CH347_CMD_JTAG_INIT_READ_LEN	1 // for JTAG_INIT we have only one data byte
+#define CH347_CMD_INIT_READ_LEN			1 // for JTAG_INIT/SWD_INIT we have only one data byte
 #define VENDOR_VERSION					0x5F // for getting the chip version
 
 #define HW_TDO_BUF_SIZE					4096 /* maybe the hardware of the CH347 chip can
@@ -104,7 +100,7 @@ static inline bool ch347_is_single_cmd_type(uint8_t type)
 	return type == CH347_CMD_GPIO || type == CH347_CMD_JTAG_INIT;
 }
 // for a single command these amount of data can be read at max
-#define CH347_SINGLE_CMD_MAX_READ		MAX(GPIO_CNT, CH347_CMD_JTAG_INIT_READ_LEN)
+#define CH347_SINGLE_CMD_MAX_READ		MAX(GPIO_CNT, CH347_CMD_INIT_READ_LEN)
 
 /* for SWD */
 #define CH347_CMD_SWD_INIT				0xE5 // SWD Interface Initialization Command
@@ -324,8 +320,9 @@ static void ch347_cmd_calc_reads(struct ch347_cmd *cmd)
 		cmd->read_len = cmd->write_data_len;
 		break;
 	case CH347_CMD_JTAG_INIT:
-		// for JTAG_INIT the amount is fixed
-		cmd->read_len = CH347_CMD_JTAG_INIT_READ_LEN;
+	case CH347_CMD_SWD_INIT:
+		// for JTAG_INIT/SWD_INIT the amount is fixed
+		cmd->read_len = CH347_CMD_INIT_READ_LEN;
 		break;
 	case CH347_CMD_JTAG_BIT_OP_RD:
 		// for bit operations we need to count the TCK high edges
@@ -359,11 +356,11 @@ static void ch347_cmd_from_scratchpad(void)
 
 	// malloc for the command and data bytes
 	struct ch347_cmd *cmd = malloc(sizeof(struct ch347_cmd));
-	cmd->write_data = malloc(ch347.scratchpad_idx);
+	if (cmd)
+		cmd->write_data = malloc(ch347.scratchpad_idx);
 	if (!cmd || !cmd->write_data) {
 		LOG_ERROR("malloc failed");
-		if (cmd)
-			free(cmd);
+		free(cmd);
 		return;
 	}
 
@@ -562,8 +559,7 @@ static void ch347_cmd_transmit_queue(void)
 		// sanity checks
 		if (!last_cmd || bytes_to_write == 0) {
 			LOG_ERROR("Nothing to send!");
-			if (decoded_buf)
-				free(decoded_buf);
+			free(decoded_buf);
 			return;
 		}
 
@@ -571,8 +567,7 @@ static void ch347_cmd_transmit_queue(void)
 		uint8_t *write_buf = malloc(bytes_to_write);
 		if (!write_buf) {
 			LOG_ERROR("malloc failed");
-			if (decoded_buf)
-				free(decoded_buf);
+			free(decoded_buf);
 			return;
 		}
 
@@ -595,23 +590,19 @@ static void ch347_cmd_transmit_queue(void)
 					cmd->read_len : DIV_ROUND_UP(cmd->tdo_bit_count, 8);
 			}
 
-			// remember if this is the last command to send in this round trip
-			bool break_loop = cmd == last_cmd;
-
 			// cmd data no longer needed
 			list_del(&cmd->queue);
 			free(cmd->write_data);
 			free(cmd);
 
-			if (break_loop)
+			if (cmd == last_cmd)
 				break;
 		}
 
 		// write data to device
 		if (ch347_write_data(write_buf, &idx) != ERROR_OK) {
 			free(write_buf);
-			if (decoded_buf)
-				free(decoded_buf);
+			free(decoded_buf);
 			return;
 		}
 		free(write_buf);
@@ -695,12 +686,11 @@ static void ch347_scan_queue_fields(struct scan_field *scan_fields, int scan_fie
 static uint8_t ch347_single_read_get_byte(int read_buf_idx)
 {
 	ch347_cmd_transmit_queue();
-	int idx = read_buf_idx;
 	if (read_buf_idx > CH347_SINGLE_CMD_MAX_READ || read_buf_idx < 0) {
 		LOG_ERROR("read_buf_idx out of range");
-		idx = 0;
+		read_buf_idx = 0;
 	}
-	return ch347.single_read[idx];
+	return ch347.single_read[read_buf_idx];
 }
 
 /**
@@ -1005,10 +995,8 @@ static void ch347_gpio_set(int gpio, bool data)
 	gpios[gpio] = data == 0 ? 0xF0 : 0xF8;
 	ch347_scratchpad_add_bytes(gpios, GPIO_CNT);
 	// check in the read if the bit is set/cleared correctly
-	if ((ch347_single_read_get_byte(gpio) & 0x40) >> 6 != data) {
+	if ((ch347_single_read_get_byte(gpio) & 0x40) >> 6 != data)
 		LOG_ERROR("Output not set.");
-		return;
-	}
 }
 
 /**
@@ -1142,7 +1130,19 @@ static int ch347_open_device(void)
 	}
 
 	struct libusb_device_descriptor ch347_device_descriptor;
-	libusb_get_device_descriptor(libusb_get_device(ch347_handle), &ch347_device_descriptor);
+	libusb_device *device = libusb_get_device(ch347_handle);
+	if (!device) {
+		LOG_ERROR("CH347 error calling libusb_get_device");
+		jtag_libusb_close(ch347_handle);
+		return ERROR_FAIL;
+	}
+
+	err_code = libusb_get_device_descriptor(device, &ch347_device_descriptor);
+	if (err_code != ERROR_OK) {
+		LOG_ERROR("CH347 error getting device descriptor: %s", libusb_error_name(err_code));
+		jtag_libusb_close(ch347_handle);
+		return err_code;
+	}
 
 	err_code = libusb_claim_interface(ch347_handle, CH347_MPHSI_INTERFACE);
 	if (err_code != ERROR_OK) {
@@ -1330,7 +1330,7 @@ static int ch347_speed_get_index(int khz, int *speed_idx)
 COMMAND_HANDLER(ch347_handle_vid_pid_command)
 {
 	if (CMD_ARGC != 2) {
-		LOG_ERROR("incomplete ch347 vid_pid configuration directive");
+		command_print(CMD, "incomplete ch347 vid_pid configuration directive");
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
@@ -1361,11 +1361,10 @@ COMMAND_HANDLER(ch347_trst)
 COMMAND_HANDLER(ch347_handle_device_desc_command)
 {
 	if (CMD_ARGC == 1) {
-		if (ch347_device_desc)
-			free(ch347_device_desc);
+		free(ch347_device_desc);
 		ch347_device_desc = strdup(CMD_ARGV[0]);
 	} else {
-		LOG_ERROR("expected exactly one argument to ch347 device_desc <description>");
+		command_print(CMD, "expected exactly one argument to ch347 device_desc <description>");
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
@@ -1393,10 +1392,10 @@ COMMAND_HANDLER(ch347_handle_activity_led_command)
 	}
 
 	if (gpio >= GPIO_CNT) {
-		LOG_ERROR("activity_led out of range");
+		command_print(CMD, "activity_led out of range");
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	} else if (((1 << gpio) & USEABLE_GPIOS) == 0) {
-		LOG_ERROR("activity_led pin not in usable list");
+		command_print(CMD, "activity_led pin not in usable list");
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
@@ -1449,35 +1448,13 @@ static const struct command_registration ch347_command_handlers[] = {
 
 /**
  * @brief swd init function
- *
- * @param clock_index clock index for CH347_CMD_SWD_INIT (E5)
- * @return true at success
  */
-static bool ch347_swd_init_cmd(uint8_t clock_index)
+static void ch347_swd_init_cmd(void)
 {
-	uint8_t cmd_buf[128] = "";
-	int i = 0;
-	cmd_buf[i++] = CH347_CMD_SWD_INIT;
-	cmd_buf[i++] = 8;
-	cmd_buf[i++] = 0;
-	cmd_buf[i++] = 0x40;
-	cmd_buf[i++] = 0x42;
-	cmd_buf[i++] = 0x0f; // Reserved bytes
-	cmd_buf[i++] = 0x00; // Reserved bytes
-	cmd_buf[i++] = clock_index; // JTAG clock speed index
-	i += 3; // Reserved Bytes
-
-	int len = i;
-	if (ch347_write_data(cmd_buf, &len) != ERROR_OK)
-		return false;
-
-	len = 4;
-	memset(cmd_buf, 0, sizeof(cmd_buf));
-
-	if (ch347_read_data(cmd_buf, &len) != ERROR_OK)
-		return false;
-
-	return true;
+	ch347_cmd_start_next(CH347_CMD_SWD_INIT);
+	uint8_t cmd_data[] = {0x40, 0x42, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00 };
+	ch347_scratchpad_add_bytes(cmd_data, ARRAY_SIZE(cmd_data));
+	ch347_cmd_transmit_queue();
 }
 
 /**
@@ -1511,7 +1488,7 @@ static int ch347_init(void)
 
 		tap_set_state(TAP_RESET);
 	} else {
-		ch347_swd_init_cmd(0);
+		ch347_swd_init_cmd();
 	}
 	return ERROR_OK;
 }
@@ -1762,7 +1739,7 @@ skip_idle:
 				goto skip;
 			}
 		} else { // read/write Reg
-			int ack;
+			uint32_t ack;
 			bool check_ack;
 			// read  Reg
 			if (recv_buf[recv_len] == CH347_CMD_SWD_REG_R) {
@@ -1777,9 +1754,9 @@ skip_idle:
 					goto skip;
 				}
 				if (pswd_io->cmd & SWD_CMD_RNW) {
-					int data = buf_get_u32(&recv_buf[recv_len], 0, 32);
-					int parity = buf_get_u32(&recv_buf[recv_len], 32, 1);
-					if (parity != parity_u32(data)) {
+					uint32_t data = buf_get_u32(&recv_buf[recv_len], 0, 32);
+					uint32_t parity = buf_get_u32(&recv_buf[recv_len], 32, 1);
+					if (parity != (uint32_t)parity_u32(data)) {
 						LOG_ERROR("SWD Read data parity mismatch");
 						ch347_swd_context.queued_retval = ERROR_FAIL;
 						goto skip;
