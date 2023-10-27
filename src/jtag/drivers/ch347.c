@@ -26,6 +26,10 @@
  *           | 8 MHz XTAL  |                                               *
  *           |_____________|                                               *
  *                                                                         *
+ *   This CH347 driver is only tested for the CH347T chip in mode 3.       *
+ *   The CH347 datasheet mention another chip the CH347F which was not     *
+ *   available for testing.                                                *
+ *                                                                         *
  ***************************************************************************/
 
 #ifdef HAVE_CONFIG_H
@@ -70,7 +74,11 @@
 												GPIO5 (Pin9 / TRST) and GPIO6 (Pin2 / CTS1) are possible
 												Tested only with CH347T not CH347F chip
 												pin numbers are for CH347T */
-#define CH347_CMD_INIT_READ_LEN			1 // for JTAG_INIT/SWD_INIT we have only one data byte
+/* For GPIO command: always set bits 7 and 6 for GPIO enable
+	bits 5 and 4 for pin direction output bit 3 is the data bit */
+#define GPIO_SET_L						(BIT(4) | BIT(5) | BIT(6) | BIT(7)) // value for setting a GPIO to low
+#define GPIO_SET_H						(BIT(3) | BIT(4) | BIT(5) | BIT(6) | BIT(7)) // value for setting a GPIO to high
+
 #define VENDOR_VERSION					0x5F // for getting the chip version
 
 #define HW_TDO_BUF_SIZE					4096 /* maybe the hardware of the CH347 chip can
@@ -81,6 +89,7 @@
 												during USB high-speed operation */
 #define USBC_PACKET_USBHS				512   // Maximum data length per packet at USB high speed
 #define CH347_CMD_HEADER				3     // Protocol header length (1 byte command type + 2 bytes data length)
+#define CH347_CMD_INIT_READ_LEN			1 // for JTAG_INIT/SWD_INIT we have only one data byte
 #define MAX_BITS_PER_BIT_OP				248   /* No more bits are allowed per CH347_CMD_JTAG_BIT_OP
 												 command; this should be dividable by 8 */
 
@@ -93,12 +102,6 @@
 #define CH347_CMD_JTAG_BIT_OP_RD		0xD2 // JTAG interface pin bit control and read commands
 #define CH347_CMD_JTAG_DATA_SHIFT		0xD3 // JTAG interface data shift command
 #define CH347_CMD_JTAG_DATA_SHIFT_RD	0xD4 // JTAG interface data shift and read command
-/* there are "single" commands. These commands can't be chained together and
-	need to be send as single command and need a read after write */
-static inline bool ch347_is_single_cmd_type(uint8_t type)
-{
-	return type == CH347_CMD_GPIO || type == CH347_CMD_JTAG_INIT;
-}
 // for a single command these amount of data can be read at max
 #define CH347_SINGLE_CMD_MAX_READ		MAX(GPIO_CNT, CH347_CMD_INIT_READ_LEN)
 
@@ -157,12 +160,12 @@ enum pack_size {
 };
 
 struct ch347_cmd {
-	uint8_t type;	// the command type
-	uint8_t *write_data;	// data bytes for write
-	uint16_t write_data_len;	// count of data bytes in the write_data buffer
-	uint16_t read_len;	// if >0 a read is needed after this command
-	uint16_t tdo_bit_count;	// how many TDO bits are needed to shift in by this read
-	struct list_head queue;	// for handling a queue (list)
+	uint8_t type; // the command type
+	uint8_t *write_data; // data bytes for write
+	uint16_t write_data_len; // count of data bytes in the write_data buffer
+	uint16_t read_len; // if >0 a read is needed after this command
+	uint16_t tdo_bit_count; // how many TDO bits are needed to shift in by this read
+	struct list_head queue; // for handling a queue (list)
 };
 
 struct ch347_scan {
@@ -227,6 +230,13 @@ static uint8_t ch347_activity_led_gpio_pin = 0xFF;
 static bool ch347_activity_led_active_high;
 static struct ch347_info ch347;
 static struct libusb_device_handle *ch347_handle;
+
+/* there are "single" commands. These commands can't be chained together and
+	need to be send as single command and need a read after write */
+static inline bool ch347_is_single_cmd_type(uint8_t type)
+{
+	return type == CH347_CMD_GPIO || type == CH347_CMD_JTAG_INIT || type == CH347_CMD_SWD_INIT;
+}
 
 /**
  * @brief writes data to the CH347 via libusb driver
@@ -402,7 +412,7 @@ static void ch347_read_scan(uint8_t *decoded_buf, int decoded_buf_len, int raw_r
 	int decoded_buf_idx = 0;
 
 	while (rd_idx < read_len) {
-		uint16_t type = read_buf[rd_idx++];
+		unsigned int type = read_buf[rd_idx++];
 		uint16_t data_len = le_to_h_u16(&read_buf[rd_idx]);
 		rd_idx += 2;
 		if (decoded_buf_idx > decoded_buf_len) {
@@ -419,6 +429,7 @@ static void ch347_read_scan(uint8_t *decoded_buf, int decoded_buf_len, int raw_r
 		switch (type) {
 		case CH347_CMD_GPIO:
 		case CH347_CMD_JTAG_INIT:
+		case CH347_CMD_SWD_INIT:
 		case CH347_CMD_JTAG_DATA_SHIFT_RD:
 			// for all bytewise commands: copy the data bytes
 			memcpy(&decoded_buf[decoded_buf_idx], &read_buf[rd_idx], data_len);
@@ -428,10 +439,10 @@ static void ch347_read_scan(uint8_t *decoded_buf, int decoded_buf_len, int raw_r
 		case CH347_CMD_JTAG_BIT_OP_RD:
 			// for CH347_CMD_JTAG_BIT_OP_RD we need to copy bit by bit
 			for (int i = 0; i < data_len; i++) {
-				if (read_buf[rd_idx + i] & 1)
-					decoded_buf[decoded_buf_idx + i / 8] |= (1 << i % 8);
+				if (read_buf[rd_idx + i] & BIT(0))
+					decoded_buf[decoded_buf_idx + i / 8] |= BIT(i % 8);
 				else
-					decoded_buf[decoded_buf_idx + i / 8] &= ~(1 << i % 8);
+					decoded_buf[decoded_buf_idx + i / 8] &= ~(BIT(i % 8));
 			}
 			rd_idx += data_len;
 			decoded_buf_idx += DIV_ROUND_UP(data_len, 8);
@@ -803,7 +814,7 @@ static void ch347_scratchpad_add_tms_change(const uint8_t *tms_value, int step, 
 
 	ch347_cmd_start_next(CH347_CMD_JTAG_BIT_OP);
 	for (int i = skip; i < step; i++)
-		ch347_scratchpad_add_clock_tms((tms_value[i / 8] >> (i % 8)) & 0x01);
+		ch347_scratchpad_add_clock_tms((tms_value[i / 8] >> (i % 8)) & BIT(0));
 	ch347_scratchpad_add_idle_clock();
 }
 
@@ -819,7 +830,7 @@ static void ch347_scratchpad_add_move_path(struct pathmove_command *cmd)
 
 	ch347_cmd_start_next(CH347_CMD_JTAG_BIT_OP);
 	for (int i = 0; i < cmd->num_states; i++) {
-		if (tap_state_transition(tap_get_state(), false) ==	cmd->path[i])
+		if (tap_state_transition(tap_get_state(), false) == cmd->path[i])
 			ch347_scratchpad_add_clock_tms(0);
 		if (tap_state_transition(tap_get_state(), true) == cmd->path[i])
 			ch347_scratchpad_add_clock_tms(1);
@@ -871,7 +882,7 @@ static void ch347_scratchpad_add_write_read(struct scan_command *cmd, uint8_t *b
 	}
 
 	// in bitwise mode only bits are allowed
-	if (ch347.use_bitwise_mode)	{
+	if (ch347.use_bitwise_mode) {
 		byte_count = 0;
 		bit_count = bits_len;
 	}
@@ -896,7 +907,7 @@ static void ch347_scratchpad_add_write_read(struct scan_command *cmd, uint8_t *b
 
 	for (int i = 0; i < bit_count; i++) {
 		if (bits)
-			ch347.tdi_pin = ((bits[byte_count + i / 8] >> i % 8) & 0x01) ? TDI_H : TDI_L;
+			ch347.tdi_pin = ((bits[byte_count + i / 8] >> i % 8) & BIT(0)) ? TDI_H : TDI_L;
 
 		// for the last bit set TMS high to exit the shift state
 		if (i + 1 == bit_count)
@@ -992,10 +1003,10 @@ static void ch347_gpio_set(int gpio, bool data)
 	/* always set bits 7 and 6 for GPIO enable
 		bits 5 and 4 for pin direction output
 		bit 3 is the data bit */
-	gpios[gpio] = data == 0 ? 0xF0 : 0xF8;
+	gpios[gpio] = data == 0 ? GPIO_SET_L : GPIO_SET_H;
 	ch347_scratchpad_add_bytes(gpios, GPIO_CNT);
 	// check in the read if the bit is set/cleared correctly
-	if ((ch347_single_read_get_byte(gpio) & 0x40) >> 6 != data)
+	if ((ch347_single_read_get_byte(gpio) & BIT(6)) >> 6 != data)
 		LOG_ERROR("Output not set.");
 }
 
@@ -1006,7 +1017,7 @@ static void ch347_gpio_set(int gpio, bool data)
  */
 static void ch347_activity_led_set(int led_state)
 {
-	if (ch347_activity_led_gpio_pin != 0xff)
+	if (ch347_activity_led_gpio_pin != 0xFF)
 		ch347_gpio_set(ch347_activity_led_gpio_pin, ch347_activity_led_active_high ? led_state : 1 - led_state);
 }
 
@@ -1164,7 +1175,7 @@ static int ch347_open_device(void)
 
 	char manufacturer[256 + 1];
 	if (libusb_get_string_descriptor_ascii(ch347_handle, ch347_device_descriptor.iManufacturer,
-		(unsigned char *)manufacturer, sizeof(manufacturer) - 1) < 0)	{
+		(unsigned char *)manufacturer, sizeof(manufacturer) - 1) < 0) {
 		strcpy(manufacturer, "(unknown)");
 	}
 	char product[256 + 1];
@@ -1174,7 +1185,7 @@ static int ch347_open_device(void)
 	}
 	char serial_number[256 + 1];
 	if (libusb_get_string_descriptor_ascii(ch347_handle, ch347_device_descriptor.iSerialNumber,
-		(unsigned char *)serial_number, sizeof(serial_number) - 1) < 0)	{
+		(unsigned char *)serial_number, sizeof(serial_number) - 1) < 0) {
 		strcpy(serial_number, "(unknown)");
 	}
 
@@ -1312,11 +1323,10 @@ static int ch347_speed_get_index(int khz, int *speed_idx)
 		LOG_INFO("Speed %d kHz is higher than highest speed of %d kHz. Using %d khz!",
 			khz, speeds[length - 1], speeds[length - 1]);
 		idx = length - 1;
-	} else if (speeds[length - 1] != khz) {
+	} else if (speeds[idx] != khz) {
 		LOG_INFO("Requested speed of %d kHz is not possible. Using the next higher speed of %d kHz!",
 			khz, speeds[idx]);
 	}
-
 
 	*speed_idx = idx;
 	return ERROR_OK;
@@ -1329,10 +1339,8 @@ static int ch347_speed_get_index(int khz, int *speed_idx)
  */
 COMMAND_HANDLER(ch347_handle_vid_pid_command)
 {
-	if (CMD_ARGC != 2) {
-		command_print(CMD, "incomplete ch347 vid_pid configuration directive");
+	if (CMD_ARGC != 2)
 		return ERROR_COMMAND_SYNTAX_ERROR;
-	}
 
 	COMMAND_PARSE_NUMBER(u16, CMD_ARGV[0], ch347_vids[0]);
 	COMMAND_PARSE_NUMBER(u16, CMD_ARGV[1], ch347_pids[0]);
@@ -1347,6 +1355,9 @@ COMMAND_HANDLER(ch347_handle_vid_pid_command)
  */
 COMMAND_HANDLER(ch347_trst)
 {
+	if (CMD_ARGC != 1)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
 	ch347_trst_set(false);
 	jtag_sleep(atoi(CMD_ARGV[0]) * 1000);
 	ch347_trst_set(true);
@@ -1360,14 +1371,11 @@ COMMAND_HANDLER(ch347_trst)
  */
 COMMAND_HANDLER(ch347_handle_device_desc_command)
 {
-	if (CMD_ARGC == 1) {
-		free(ch347_device_desc);
-		ch347_device_desc = strdup(CMD_ARGV[0]);
-	} else {
-		command_print(CMD, "expected exactly one argument to ch347 device_desc <description>");
+	if (CMD_ARGC != 1)
 		return ERROR_COMMAND_SYNTAX_ERROR;
-	}
 
+	free(ch347_device_desc);
+	ch347_device_desc = strdup(CMD_ARGV[0]);
 	return ERROR_OK;
 }
 
@@ -1383,21 +1391,15 @@ COMMAND_HANDLER(ch347_handle_activity_led_command)
 
 	uint8_t gpio;
 	if (CMD_ARGV[0][0] == 'n') {
-		COMMAND_PARSE_NUMBER(u8, ++CMD_ARGV[0], gpio);
+		COMMAND_PARSE_NUMBER(u8, &CMD_ARGV[0][1], gpio);
 		ch347_activity_led_active_high = false;
-		CMD_ARGV[0]--;
 	} else {
 		COMMAND_PARSE_NUMBER(u8, CMD_ARGV[0], gpio);
 		ch347_activity_led_active_high = true;
 	}
 
-	if (gpio >= GPIO_CNT) {
-		command_print(CMD, "activity_led out of range");
-		return ERROR_COMMAND_SYNTAX_ERROR;
-	} else if (((1 << gpio) & USEABLE_GPIOS) == 0) {
-		command_print(CMD, "activity_led pin not in usable list");
-		return ERROR_COMMAND_SYNTAX_ERROR;
-	}
+	if (gpio >= GPIO_CNT || (BIT(gpio) & USEABLE_GPIOS) == 0)
+		return ERROR_COMMAND_ARGUMENT_INVALID;
 
 	ch347_activity_led_gpio_pin = gpio;
 
@@ -1431,7 +1433,7 @@ static const struct command_registration ch347_subcommand_handlers[] = {
 		.handler = &ch347_handle_activity_led_command,
 		.mode = COMMAND_CONFIG,
 		.help = "if set this CH347 GPIO pin is the JTAG activity LED; start with n for active low output",
-		.usage = "n4 or 4",
+		.usage = "[n]gpio_number",
 	},
 
 	COMMAND_REGISTRATION_DONE};
@@ -1515,7 +1517,7 @@ static int ch347_swd_init(void)
 	struct ch347_swd_io *pswd_io = ch347_swd_context.ch347_cmd_buf;
 	for (int i = 0; i < CH347_MAX_CMD_BUF; i++, pswd_io++) {
 		INIT_LIST_HEAD(&pswd_io->list_entry);
-		list_add_tail(&pswd_io->list_entry,	&ch347_swd_context.free_cmd_head);
+		list_add_tail(&pswd_io->list_entry, &ch347_swd_context.free_cmd_head);
 	}
 	return ERROR_OK;
 }
@@ -1564,18 +1566,16 @@ static void ch347_swd_queue_flush(void)
 	}
 }
 
-static void ch347_write_swd_reg(uint8_t cmd, const uint8_t *out, uint8_t parity)
+static void ch347_write_swd_reg(uint8_t cmd, const uint32_t out)
 {
 	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = CH347_CMD_SWD_REG_W;
 	// 8bit + 32bit +1bit
 	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = 0x29;
 	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = 0x00;
 	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = cmd;
-	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = out[0];
-	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = out[1];
-	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = out[2];
-	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = out[3];
-	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = parity;
+	h_u32_to_le(&ch347_swd_context.send_buf[ch347_swd_context.send_len], out);
+	ch347_swd_context.send_len += 4;
+	ch347_swd_context.send_buf[ch347_swd_context.send_len++] = parity_u32(out);
 	// 0xA0 +  1 byte(3bit ACK)
 	ch347_swd_context.need_recv_len += (1 + 1);
 }
@@ -1861,7 +1861,7 @@ static void ch347_swd_queue_cmd(uint8_t cmd, uint32_t *dst, uint32_t data, uint3
 	} else {
 		pswd_io->usb_cmd = CH347_CMD_SWD_REG_W;
 		pswd_io->value = data;
-		ch347_write_swd_reg(pswd_io->cmd, (uint8_t *)&data,	parity_u32(data));
+		ch347_write_swd_reg(pswd_io->cmd, data);
 	}
 
 	ch347_swd_context.sent_cmd_count++;
