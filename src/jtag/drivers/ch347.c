@@ -111,7 +111,7 @@
 #define CH347_CMD_SWD_REG_W				0xA0 // SWD Interface write reg
 #define CH347_CMD_SWD_SEQ_W				0xA1 // SWD Interface write spec seq
 #define CH347_CMD_SWD_REG_R				0xA2 // SWD Interface read  reg
-#define CH347_MAX_SEND_CMD				0X20 // max send cmd number
+#define CH347_MAX_SEND_CMD				19 // max send cmd number
 #define CH347_MAX_SEND_BUF				0X200
 #define CH347_MAX_RECV_BUF				0X200
 #define CH347_MAX_CMD_BUF				128
@@ -760,20 +760,21 @@ static void ch347_scratchpad_add_bytes(uint8_t *bytes, int count)
 		return;
 	}
 
-	// enough space in scratchpad?
-	if (ch347.scratchpad_idx + count <= UCMDPKT_DATA_MAX_BYTES_USBHS) {
+	int remaining = count;
+	int bytes_idx = 0;
+	while (remaining > 0) {
+		int bytes_to_store = ch347.scratchpad_idx + remaining <= UCMDPKT_DATA_MAX_BYTES_USBHS ?
+			remaining :	UCMDPKT_DATA_MAX_BYTES_USBHS - ch347.scratchpad_idx;
+
 		if (bytes)
-			memcpy(&ch347.scratchpad[ch347.scratchpad_idx], bytes, count);
+			memcpy(&ch347.scratchpad[ch347.scratchpad_idx], &bytes[bytes_idx], bytes_to_store);
 		else
-			memset(&ch347.scratchpad[ch347.scratchpad_idx], 0, count);
-		ch347.scratchpad_idx += count;
+			memset(&ch347.scratchpad[ch347.scratchpad_idx], 0, bytes_to_store);
+
+		ch347.scratchpad_idx += bytes_to_store;
+		bytes_idx += bytes_to_store;
+		remaining -= bytes_to_store;
 		ch347_scratchpad_check_full();
-	} else {
-		// make two chunks and recursivly call this function again
-		int bytes_to_store = UCMDPKT_DATA_MAX_BYTES_USBHS - ch347.scratchpad_idx;
-		int bytes_remaining = count - bytes_to_store;
-		ch347_scratchpad_add_bytes(bytes, bytes_to_store);
-		ch347_scratchpad_add_bytes(&bytes[bytes_to_store], bytes_remaining);
 	}
 }
 
@@ -790,6 +791,18 @@ static void ch347_scratchpad_add_clock_tms(bool tms)
 	ch347_scratchpad_add_pin_byte();
 	ch347.tck_pin = TCK_H;
 	ch347_scratchpad_add_pin_byte();
+}
+
+/**
+ * @brief Function adds a certain amount of TCK pulses without changing the TMS pin
+ *
+ * @param count Amount of L/H TCK pulses to add
+ */
+static void ch347_scratchpad_add_stableclocks(int count)
+{
+	bool tms = ch347.tms_pin == TMS_H;
+	for (int i = 0; i < count; i++)
+		ch347_scratchpad_add_clock_tms(tms);
 }
 
 /**
@@ -832,8 +845,10 @@ static void ch347_scratchpad_add_move_path(struct pathmove_command *cmd)
 	for (int i = 0; i < cmd->num_states; i++) {
 		if (tap_state_transition(tap_get_state(), false) == cmd->path[i])
 			ch347_scratchpad_add_clock_tms(0);
-		if (tap_state_transition(tap_get_state(), true) == cmd->path[i])
+		else if (tap_state_transition(tap_get_state(), true) == cmd->path[i])
 			ch347_scratchpad_add_clock_tms(1);
+		else
+			LOG_ERROR("No transition possible!");
 		tap_set_state(cmd->path[i]);
 	}
 	ch347_scratchpad_add_idle_clock();
@@ -944,10 +959,7 @@ static void ch347_scratchpad_add_run_test(int cycles, tap_state_t state)
 	if (tap_get_state() != TAP_IDLE)
 		ch347_scratchpad_add_move_state(TAP_IDLE, 0);
 
-	uint8_t tms_value = 0;
-	ch347_scratchpad_add_tms_change(&tms_value, cycles, 1);
-
-	ch347_scratchpad_add_write_read(NULL, NULL, cycles, SCAN_OUT);
+	ch347_scratchpad_add_stableclocks(cycles);
 	ch347_scratchpad_add_move_state(state, 0);
 }
 
@@ -1098,7 +1110,7 @@ static int ch347_execute_queue(void)
 					  cmd->cmd.runtest->end_state);
 			break;
 		case JTAG_STABLECLOCKS:
-			ch347_scratchpad_add_write_read(NULL, NULL, cmd->cmd.stableclocks->num_cycles, SCAN_OUT);
+			ch347_scratchpad_add_stableclocks(cmd->cmd.stableclocks->num_cycles);
 			break;
 		case JTAG_TLR_RESET:
 			ch347_scratchpad_add_move_state(cmd->cmd.statemove->end_state, 0);
@@ -1476,22 +1488,22 @@ static int ch347_init(void)
 
 	LOG_DEBUG_IO("CH347 open success");
 
-	if (!swd_mode) {
-		// ch347 jtag init
-		ch347.tck_pin = TCK_L;
-		ch347.tms_pin = TMS_H;
-		ch347.tdi_pin = TDI_L;
-		ch347.trst_pin = TRST_H;
+	// ch347 jtag init
+	ch347.tck_pin = TCK_L;
+	ch347.tms_pin = TMS_H;
+	ch347.tdi_pin = TDI_L;
+	ch347.trst_pin = TRST_H;
 
-		INIT_LIST_HEAD(&ch347.cmd_queue);
-		INIT_LIST_HEAD(&ch347.scan_queue);
+	INIT_LIST_HEAD(&ch347.cmd_queue);
+	INIT_LIST_HEAD(&ch347.scan_queue);
 
-		ch347.pack_size = UNSET;
+	ch347.pack_size = UNSET;
 
+	if (!swd_mode)
 		tap_set_state(TAP_RESET);
-	} else {
+	else
 		ch347_swd_init_cmd();
-	}
+
 	return ERROR_OK;
 }
 
@@ -1548,17 +1560,16 @@ static void ch347_swd_queue_flush(void)
 		LOG_DEBUG("CH347WriteData error");
 		return;
 	}
-	ch347_swd_context.recv_len = 0;
-	do {
-		length = CH347_MAX_RECV_BUF - ch347_swd_context.recv_len;
-		if (ch347_read_data(&ch347_swd_context.recv_buf[ch347_swd_context.recv_len], &length) != ERROR_OK) {
-			ch347_swd_context.queued_retval = ERROR_FAIL;
-			LOG_DEBUG("CH347ReadData error");
-			return;
-		}
-		ch347_swd_context.recv_len += length;
-	} while (ch347_swd_context.recv_len < ch347_swd_context.need_recv_len);
 
+	ch347_swd_context.recv_len = 0;
+	length = ch347_swd_context.recv_len;
+	if (ch347_read_data(&ch347_swd_context.recv_buf[ch347_swd_context.recv_len], &length) != ERROR_OK) {
+		ch347_swd_context.queued_retval = ERROR_FAIL;
+		LOG_DEBUG("CH347ReadData error");
+		return;
+	}
+
+	ch347_swd_context.recv_len += length;
 	if (ch347_swd_context.need_recv_len > ch347_swd_context.recv_len) {
 		LOG_ERROR("write/read failed %d %d",
 			  ch347_swd_context.recv_len,
