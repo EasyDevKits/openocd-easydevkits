@@ -222,7 +222,6 @@ struct ch347_swd_context {
 
 static struct ch347_swd_context ch347_swd_context;
 static bool swd_mode;
-static bool dev_is_opened; // Whether the device is turned on
 static uint16_t ch347_vids[] = {DEFAULT_VENDOR_ID, 0};
 static uint16_t ch347_pids[] = {DEFAULT_PRODUCT_ID, 0};
 static char *ch347_device_desc;
@@ -252,12 +251,12 @@ static int ch347_write_data(uint8_t *data, int *length)
 	int transferred = 0;
 
 	while (true) {
-		int ret = jtag_libusb_bulk_write(ch347_handle, CH347_EPOUT, (char *)&data[i],
+		int retval = jtag_libusb_bulk_write(ch347_handle, CH347_EPOUT, (char *)&data[i],
 			write_len, USB_WRITE_TIMEOUT, &transferred);
-		if (ret) {
+		if (retval != ERROR_OK) {
 			LOG_ERROR("CH347 write fail");
 			*length = 0;
-			return ret;
+			return retval;
 		}
 		i += transferred;
 		if (i >= *length)
@@ -289,12 +288,12 @@ static int ch347_read_data(uint8_t *data, int *length)
 	int transferred = 0;
 
 	while (true) {
-		int ret = jtag_libusb_bulk_read(ch347_handle, CH347_EPIN, (char *)&data[i],
+		int retval = jtag_libusb_bulk_read(ch347_handle, CH347_EPIN, (char *)&data[i],
 			read_len, USB_READ_TIMEOUT, &transferred);
-		if (ret) {
+		if (retval != ERROR_OK) {
 			LOG_ERROR("CH347 read fail");
 			*length = 0;
-			return ret;
+			return retval;
 		}
 
 		i += transferred;
@@ -693,6 +692,7 @@ static void ch347_scan_queue_fields(struct scan_field *scan_fields, int scan_fie
  * that's read back from USB
  *
  * @param read_buf_idx index of the byte that should be returned
+ * @return byte at index or if index is out of range the first byte
  */
 static uint8_t ch347_single_read_get_byte(int read_buf_idx)
 {
@@ -836,22 +836,26 @@ static void ch347_scratchpad_add_tms_change(const uint8_t *tms_value, int step, 
  * @brief Obtain the current Tap status and switch to the status TMS value passed down by cmd
  *
  * @param cmd Upper layer transfer command parameters
+ * @return ERROR_OK at success; ERROR_JTAG_TRANSITION_INVALID if no transition is possible
  */
-static void ch347_scratchpad_add_move_path(struct pathmove_command *cmd)
+static int ch347_scratchpad_add_move_path(struct pathmove_command *cmd)
 {
 	LOG_DEBUG_IO("num_states=%d, last_state=%d", cmd->num_states, cmd->path[cmd->num_states - 1]);
 
 	ch347_cmd_start_next(CH347_CMD_JTAG_BIT_OP);
 	for (int i = 0; i < cmd->num_states; i++) {
-		if (tap_state_transition(tap_get_state(), false) == cmd->path[i])
+		if (tap_state_transition(tap_get_state(), false) == cmd->path[i]) {
 			ch347_scratchpad_add_clock_tms(0);
-		else if (tap_state_transition(tap_get_state(), true) == cmd->path[i])
+		} else if (tap_state_transition(tap_get_state(), true) == cmd->path[i]) {
 			ch347_scratchpad_add_clock_tms(1);
-		else
+		} else {
 			LOG_ERROR("No transition possible!");
+			return ERROR_JTAG_TRANSITION_INVALID;
+		}
 		tap_set_state(cmd->path[i]);
 	}
 	ch347_scratchpad_add_idle_clock();
+	return ERROR_OK;
 }
 
 /**
@@ -950,8 +954,8 @@ static void ch347_scratchpad_add_write_read(struct scan_command *cmd, uint8_t *b
 /**
  * @brief Toggle the Tap state to run test/idle
  *
- * @param cycles
- * @param state
+ * @param cycles how many clock cycles for output
+ * @param state JTAG end state
  */
 static void ch347_scratchpad_add_run_test(int cycles, tap_state_t state)
 {
@@ -1098,11 +1102,11 @@ static void ch347_sleep(int us)
 static int ch347_execute_queue(void)
 {
 	struct jtag_command *cmd;
-	int ret = ERROR_OK;
+	int retval = ERROR_OK;
 
 	ch347_activity_led_set(LED_ON);
 
-	for (cmd = jtag_command_queue; ret == ERROR_OK && cmd;
+	for (cmd = jtag_command_queue; retval == ERROR_OK && cmd;
 		 cmd = cmd->next) {
 		switch (cmd->type) {
 		case JTAG_RUNTEST:
@@ -1116,7 +1120,7 @@ static int ch347_execute_queue(void)
 			ch347_scratchpad_add_move_state(cmd->cmd.statemove->end_state, 0);
 			break;
 		case JTAG_PATHMOVE:
-			ch347_scratchpad_add_move_path(cmd->cmd.pathmove);
+			retval = ch347_scratchpad_add_move_path(cmd->cmd.pathmove);
 			break;
 		case JTAG_TMS:
 			ch347_scratchpad_add_tms_change(cmd->cmd.tms->bits, cmd->cmd.tms->num_bits, 0);
@@ -1125,18 +1129,18 @@ static int ch347_execute_queue(void)
 			ch347_sleep(cmd->cmd.sleep->us);
 			break;
 		case JTAG_SCAN:
-			ret = ch347_scratchpad_add_scan(cmd->cmd.scan);
+			retval = ch347_scratchpad_add_scan(cmd->cmd.scan);
 			break;
 		default:
 			LOG_ERROR("BUG: unknown JTAG command type 0x%X", cmd->type);
-			ret = ERROR_FAIL;
+			retval = ERROR_FAIL;
 			break;
 		}
 	}
 
 	ch347_activity_led_set(LED_OFF);
 	ch347_cmd_transmit_queue();
-	return ret;
+	return retval;
 }
 
 /**
@@ -1146,10 +1150,10 @@ static int ch347_execute_queue(void)
  */
 static int ch347_open_device(void)
 {
-	int err_code = jtag_libusb_open(ch347_vids, ch347_pids, ch347_device_desc, &ch347_handle, NULL);
-	if (err_code != ERROR_OK) {
+	int retval = jtag_libusb_open(ch347_vids, ch347_pids, ch347_device_desc, &ch347_handle, NULL);
+	if (retval != ERROR_OK) {
 		LOG_ERROR("CH347 not found: vid=%04x, pid=%04x",  ch347_vids[0], ch347_pids[0]);
-		return err_code;
+		return retval;
 	}
 
 	struct libusb_device_descriptor ch347_device_descriptor;
@@ -1160,29 +1164,29 @@ static int ch347_open_device(void)
 		return ERROR_FAIL;
 	}
 
-	err_code = libusb_get_device_descriptor(device, &ch347_device_descriptor);
-	if (err_code != ERROR_OK) {
-		LOG_ERROR("CH347 error getting device descriptor: %s", libusb_error_name(err_code));
+	retval = libusb_get_device_descriptor(device, &ch347_device_descriptor);
+	if (retval != ERROR_OK) {
+		LOG_ERROR("CH347 error getting device descriptor: %s", libusb_error_name(retval));
 		jtag_libusb_close(ch347_handle);
-		return err_code;
+		return retval;
 	}
 
-	err_code = libusb_claim_interface(ch347_handle, CH347_MPHSI_INTERFACE);
-	if (err_code != ERROR_OK) {
-		LOG_ERROR("CH347 unable to claim interface: %s", libusb_error_name(err_code));
+	retval = libusb_claim_interface(ch347_handle, CH347_MPHSI_INTERFACE);
+	if (retval != ERROR_OK) {
+		LOG_ERROR("CH347 unable to claim interface: %s", libusb_error_name(retval));
 		jtag_libusb_close(ch347_handle);
-		return err_code;
+		return retval;
 	}
 
 	char firmware_version;
-	err_code = jtag_libusb_control_transfer(ch347_handle,
+	retval = jtag_libusb_control_transfer(ch347_handle,
 		LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
 		VENDOR_VERSION, 0, 0, &firmware_version, sizeof(firmware_version),
 		USB_WRITE_TIMEOUT, NULL);
-	if (err_code != ERROR_OK) {
+	if (retval != ERROR_OK) {
 		LOG_ERROR("CH347 unable to get firmware version");
 		jtag_libusb_close(ch347_handle);
-		return err_code;
+		return retval;
 	}
 
 	char manufacturer[256 + 1];
@@ -1227,14 +1231,11 @@ static int ch347_open_device(void)
  */
 static int ch347_quit(void)
 {
-	if (dev_is_opened) {
-		// on close set the LED on, because the state without JTAG is on
-		ch347_activity_led_set(LED_ON);
-		ch347_cmd_transmit_queue();
-		jtag_libusb_close(ch347_handle);
-		LOG_DEBUG_IO("CH347 close");
-		dev_is_opened = false;
-	}
+	// on close set the LED on, because the state without JTAG is on
+	ch347_activity_led_set(LED_ON);
+	ch347_cmd_transmit_queue();
+	jtag_libusb_close(ch347_handle);
+	LOG_DEBUG_IO("CH347 close");
 	return ERROR_OK;
 }
 
@@ -1447,8 +1448,8 @@ static const struct command_registration ch347_subcommand_handlers[] = {
 		.help = "if set this CH347 GPIO pin is the JTAG activity LED; start with n for active low output",
 		.usage = "[n]gpio_number",
 	},
-
-	COMMAND_REGISTRATION_DONE};
+	COMMAND_REGISTRATION_DONE
+};
 
 static const struct command_registration ch347_command_handlers[] = {
 	{
@@ -1458,17 +1459,24 @@ static const struct command_registration ch347_command_handlers[] = {
 		.chain = ch347_subcommand_handlers,
 		.usage = "",
 	},
-	COMMAND_REGISTRATION_DONE};
+	COMMAND_REGISTRATION_DONE
+};
 
 /**
  * @brief swd init function
+ *
+ * @return ERROR_OK on success
  */
-static void ch347_swd_init_cmd(void)
+static int ch347_swd_init_cmd(void)
 {
 	ch347_cmd_start_next(CH347_CMD_SWD_INIT);
 	uint8_t cmd_data[] = {0x40, 0x42, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00 };
 	ch347_scratchpad_add_bytes(cmd_data, ARRAY_SIZE(cmd_data));
-	ch347_cmd_transmit_queue();
+	/* TODO: CH347_CMD_SWD_INIT reads one data byte.
+		But how can we decide if SWD init was successfully executed?
+		Return an error code if init was failed */
+	ch347_single_read_get_byte(0);
+	return ERROR_OK;
 }
 
 /**
@@ -1478,12 +1486,11 @@ static void ch347_swd_init_cmd(void)
  */
 static int ch347_init(void)
 {
-	int err_code = ch347_open_device();
-	dev_is_opened = err_code == ERROR_OK;
+	int retval = ch347_open_device();
 
-	if (!dev_is_opened) {
+	if (retval != ERROR_OK) {
 		LOG_ERROR("CH347 open error");
-		return err_code;
+		return retval;
 	}
 
 	LOG_DEBUG_IO("CH347 open success");
@@ -1502,9 +1509,9 @@ static int ch347_init(void)
 	if (!swd_mode)
 		tap_set_state(TAP_RESET);
 	else
-		ch347_swd_init_cmd();
+		retval = ch347_swd_init_cmd();
 
-	return ERROR_OK;
+	return retval;
 }
 
 /**
