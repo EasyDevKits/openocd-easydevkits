@@ -413,6 +413,10 @@ AC_ARG_ENABLE([ch347],
   AS_HELP_STRING([--enable-ch347], [Enable building support for CH347]),
   [build_ch347=$enableval], [build_ch347=no])
 
+AC_ARG_ENABLE([ch347],
+  AS_HELP_STRING([--enable-ch347], [Enable building support for CH347]),
+  [build_ch347=$enableval], [build_ch347=no])
+
 AS_CASE(["${host_cpu}"],
   [i?86|x86*], [],
   [
@@ -562,6 +566,12 @@ AS_IF([test "x$build_esp_compression" = "xyes"], [
   AC_CHECK_HEADERS([zlib.h])
 ], [
   AC_DEFINE([BUILD_ESP_COMPRESSION], [0], [0 if you don't want ESP compression support.])
+])
+
+AS_IF([test "x$build_ch347" = "xyes"], [
+  AC_DEFINE([BUILD_CH347], [1], [1 if you want CH347.])
+], [
+  AC_DEFINE([BUILD_CH347], [0], [0 if you don't want CH347.])
 ])
 
 AS_IF([test "x$build_ch347" = "xyes"], [
@@ -775,6 +785,8 @@ AM_CONDITIONAL([BUILD_ESP_REMOTE], [test "x$build_esp_remote" = "xyes"])
 AM_CONDITIONAL([BUILD_ESP_COMPRESSION], [test "x$build_esp_compression" = "xyes"])
 
 AM_CONDITIONAL([USE_GCOV], [test "x$enable_gcov" = "xyes"])
+
+AM_CONDITIONAL([BUILD_CH347], [test "x$build_ch347" = "xyes"])
 
 AM_CONDITIONAL([BUILD_CH347], [test "x$build_ch347" = "xyes"])
 
