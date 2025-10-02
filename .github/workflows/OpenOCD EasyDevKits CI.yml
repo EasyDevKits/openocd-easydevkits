@@ -8,44 +8,55 @@ on:
 
 jobs:
   build-linux:
-
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Install jimtcl
-      env:
-        BUILD_DIR: build
-      run: |
-        mkdir -p $BUILD_DIR
-        export PREFIX="$(realpath $BUILD_DIR)/opt"
-        export DL_DIR="$(realpath $BUILD_DIR)/dl"
-        mkdir -p $PREFIX $DL_DIR
+      - uses: actions/checkout@v4
+      - name: install deps
+        run: sudo apt-get install libudev-dev systemd --force-yes -y
+      - name: Build and Upload OpenOCD artifact
+        uses: ./.github/actions/common-build-steps
+        with:
+          arch: linux
 
-        # JIMTCL
-        export JIMTCL_VER=jimtcl-0.83
-        cd $DL_DIR && wget https://dl.espressif.com/dl/$JIMTCL_VER.tar.gz -O $JIMTCL_VER.tar.gz
-        tar xzf $JIMTCL_VER.tar.gz && rm $JIMTCL_VER.tar.gz && pushd $JIMTCL_VER
-        ./configure --prefix="$PREFIX" --host= --disable-shared CC=gcc
-        make
-        # Running "make" does not create this file for static builds on Windows but "make install" still expects it
-        touch build-jim-ext
-        make install
-        popd
-    - name: Install libusb
-      run: sudo apt-get -y install libusb-1.0
-    - name: Bootstrap
-      run: ./bootstrap
-    - name: Configure
-      run: ./configure --disable-doxygen-html --enable-remote-bitbang
-    - name: Make
-      run: make
-    - name: Create package
-      run: make DESTDIR=/tmp install
-    - uses: actions/upload-artifact@v4
-      with:
-        name: openocd-easydevkits-linux
-        path: /tmp/usr/local
+  #build-linux:
+
+  #  runs-on: ubuntu-latest
+
+  #  steps:
+  #  - uses: actions/checkout@v4
+  #  - name: Install jimtcl
+  #    env:
+  #      BUILD_DIR: build
+  #    run: |
+  #      mkdir -p $BUILD_DIR
+  #      export PREFIX="$(realpath $BUILD_DIR)/opt"
+  #      export DL_DIR="$(realpath $BUILD_DIR)/dl"
+  #      mkdir -p $PREFIX $DL_DIR
+
+  #      # JIMTCL
+  #      export JIMTCL_VER=jimtcl-0.83
+  #      cd $DL_DIR && wget https://dl.espressif.com/dl/$JIMTCL_VER.tar.gz -O $JIMTCL_VER.tar.gz
+  #      tar xzf $JIMTCL_VER.tar.gz && rm $JIMTCL_VER.tar.gz && pushd $JIMTCL_VER
+  #      ./configure --prefix="$PREFIX" --host= --disable-shared CC=gcc
+  #      make
+  #      # Running "make" does not create this file for static builds on Windows but "make install" still expects it
+  #      touch build-jim-ext
+  #      make install
+  #      popd
+  #  - name: Install libusb
+  #    run: sudo apt-get -y install libusb-1.0
+  #  - name: Bootstrap
+  #    run: ./bootstrap
+  #  - name: Configure
+  #    run: ./configure --disable-doxygen-html --enable-remote-bitbang
+  #  - name: Make
+  #    run: make
+  #  - name: Create package
+  #    run: make DESTDIR=/tmp install
+  #  - uses: actions/upload-artifact@v4
+  #    with:
+  #      name: openocd-easydevkits-linux
+  #      path: /tmp/usr/local
 
   #build-windows:
 
