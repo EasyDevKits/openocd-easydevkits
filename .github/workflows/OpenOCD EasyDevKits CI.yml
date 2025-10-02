@@ -13,6 +13,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
     - name: Install dependencies
       run: sudo apt-get -y install libusb-1.0
     - name: Bootstrap
@@ -38,6 +40,8 @@ jobs:
     
     steps:
     - uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
     - uses: msys2/setup-msys2@v2
       with:
         msystem: MINGW32
