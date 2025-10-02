@@ -416,4 +416,5 @@ extern struct adapter_driver xlnx_axi_xvc_adapter_driver;
 extern struct adapter_driver xlnx_pcie_xvc_adapter_driver;
 extern struct adapter_driver esp_remote_adapter_driver;
 extern struct adapter_driver esp_gpio_adapter_driver;
+
 #endif /* OPENOCD_JTAG_INTERFACE_H */

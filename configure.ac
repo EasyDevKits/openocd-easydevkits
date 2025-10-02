@@ -413,10 +413,6 @@ AC_ARG_ENABLE([ch347],
   AS_HELP_STRING([--enable-ch347], [Enable building support for CH347]),
   [build_ch347=$enableval], [build_ch347=no])
 
-AC_ARG_ENABLE([ch347],
-  AS_HELP_STRING([--enable-ch347], [Enable building support for CH347]),
-  [build_ch347=$enableval], [build_ch347=no])
-
 AS_CASE(["${host_cpu}"],
   [i?86|x86*], [],
   [
