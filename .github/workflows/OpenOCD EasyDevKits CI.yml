@@ -14,6 +14,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Install jimtcl
+      env:
+        BUILD_DIR: build
       run: |
         mkdir -p $BUILD_DIR
         export PREFIX="$(realpath $BUILD_DIR)/opt"
@@ -35,7 +37,7 @@ jobs:
     - name: Bootstrap
       run: ./bootstrap
     - name: Configure
-      run: ./configure
+      run: ./configure --disable-doxygen-html --enable-remote-bitbang
     - name: Make
       run: make
     - name: Create package
