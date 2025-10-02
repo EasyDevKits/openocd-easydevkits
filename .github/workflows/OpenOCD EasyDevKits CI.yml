@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Install dependencies
       run: sudo apt-get -y install libusb-1.0
     - name: Bootstrap
@@ -23,7 +23,7 @@ jobs:
       run: make
     - name: Create package
       run: make DESTDIR=/tmp install
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@v4
       with:
         name: openocd-easydevkits-linux
         path: /tmp/usr/local
@@ -37,7 +37,7 @@ jobs:
         shell: msys2 {0}
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - uses: msys2/setup-msys2@v2
       with:
         msystem: MINGW32
@@ -53,7 +53,7 @@ jobs:
       run: make
     - name: Create package
       run: make DESTDIR=/tmp install
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@v4
       with:
         name: openocd-easydevkits-windows
         path: D:\a\_temp\msys64\tmp\mingw32
