@@ -19,7 +19,7 @@ jobs:
         export JIMTCL_VER=jimtcl-0.83
         cd $DL_DIR && wget https://dl.espressif.com/dl/$JIMTCL_VER.tar.gz -O $JIMTCL_VER.tar.gz
         tar xzf $JIMTCL_VER.tar.gz && rm $JIMTCL_VER.tar.gz && pushd $JIMTCL_VER
-        ./configure --prefix="$PREFIX" --host=${CONF_HOST} --disable-shared CC=${HOST_CC}
+        ./configure --prefix="$PREFIX" --host= --disable-shared CC=gcc
         make
         # Running "make" does not create this file for static builds on Windows but "make install" still expects it
         touch build-jim-ext
@@ -40,44 +40,44 @@ jobs:
         name: openocd-easydevkits-linux
         path: /tmp/usr/local
 
-  build-windows:
+  #build-windows:
 
-    runs-on: windows-latest
+  #  runs-on: windows-latest
 
-    defaults:
-      run:
-        shell: msys2 {0}
+  #  defaults:
+  #    run:
+  #      shell: msys2 {0}
     
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install jimtcl
-      run: |
-        # JIMTCL
-        export JIMTCL_VER=jimtcl-0.83
-        cd $DL_DIR && wget https://dl.espressif.com/dl/$JIMTCL_VER.tar.gz -O $JIMTCL_VER.tar.gz
-        tar xzf $JIMTCL_VER.tar.gz && rm $JIMTCL_VER.tar.gz && pushd $JIMTCL_VER
-        ./configure --prefix="$PREFIX" --host=${CONF_HOST} --disable-shared CC=${HOST_CC}
-        make
-        # Running "make" does not create this file for static builds on Windows but "make install" still expects it
-        touch build-jim-ext
-        make install
-        popd
-    - uses: msys2/setup-msys2@v2
-      with:
-        msystem: MINGW32
-        update: true
-        #for MINGW64 but not working - install: base-devel mingw-w64-x86_64-toolchain git libtool pkg-config autoconf automake texinfo mingw-w64-x86_64-libusb
-        install: base-devel mingw-w64-i686-gcc mingw-w64-i686-toolchain git libtool pkg-config autoconf automake texinfo mingw-w64-i686-libusb
+  #  steps:
+  #  - uses: actions/checkout@v4
+  #  - name: Install jimtcl
+  #    run: |
+  #      # JIMTCL
+  #      export JIMTCL_VER=jimtcl-0.83
+  #      cd $DL_DIR && wget https://dl.espressif.com/dl/$JIMTCL_VER.tar.gz -O $JIMTCL_VER.tar.gz
+  #      tar xzf $JIMTCL_VER.tar.gz && rm $JIMTCL_VER.tar.gz && pushd $JIMTCL_VER
+  #      ./configure --prefix="$PREFIX" --host=${CONF_HOST} --disable-shared CC=${HOST_CC}
+  #      make
+  #      # Running "make" does not create this file for static builds on Windows but "make install" still expects it
+  #      touch build-jim-ext
+  #      make install
+  #      popd
+  #  - uses: msys2/setup-msys2@v2
+  #    with:
+  #      msystem: MINGW32
+  #      update: true
+  #      #for MINGW64 but not working - install: base-devel mingw-w64-x86_64-toolchain git libtool pkg-config autoconf automake texinfo mingw-w64-x86_64-libusb
+  #      install: base-devel mingw-w64-i686-gcc mingw-w64-i686-toolchain git libtool pkg-config autoconf automake texinfo mingw-w64-i686-libusb
 
-    - name: Bootstrap
-      run: ./bootstrap
-    - name: Configure
-      run: ./configure
-    - name: Make
-      run: make
-    - name: Create package
-      run: make DESTDIR=/tmp install
-    - uses: actions/upload-artifact@v4
-      with:
-        name: openocd-easydevkits-windows
-        path: D:\a\_temp\msys64\tmp\mingw32
+  #  - name: Bootstrap
+  #    run: ./bootstrap
+  #  - name: Configure
+  #    run: ./configure
+  #  - name: Make
+  #    run: make
+  #  - name: Create package
+  #    run: make DESTDIR=/tmp install
+  #  - uses: actions/upload-artifact@v4
+  #    with:
+  #      name: openocd-easydevkits-windows
+  #      path: D:\a\_temp\msys64\tmp\mingw32
