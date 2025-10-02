@@ -130,7 +130,7 @@ m4_define([ADAPTER_OPT], [m4_translit(ADAPTER_ARG($1), [_], [-])])
 
 m4_define([USB1_ADAPTERS],
 	[[[ftdi], [MPSSE mode of FTDI based devices], [FTDI]],
-	[[ch347], [Mode 3 of CH347 based devices], [CH347]],
+	[[ch347], [CH347 based devices], [CH347]],
 	[[stlink], [ST-Link Programmer], [HLADAPTER_STLINK]],
 	[[ti_icdi], [TI ICDI JTAG Programmer], [HLADAPTER_ICDI]],
 	[[ulink], [Keil ULINK JTAG Programmer], [ULINK]],
@@ -570,12 +570,6 @@ AS_IF([test "x$build_ch347" = "xyes"], [
   AC_DEFINE([BUILD_CH347], [0], [0 if you don't want CH347.])
 ])
 
-AS_IF([test "x$build_ch347" = "xyes"], [
-  AC_DEFINE([BUILD_CH347], [1], [1 if you want CH347.])
-], [
-  AC_DEFINE([BUILD_CH347], [0], [0 if you don't want CH347.])
-])
-
 PKG_CHECK_MODULES([LIBUSB1], [libusb-1.0], [
 	use_libusb1=yes
 	AC_DEFINE([HAVE_LIBUSB1], [1], [Define if you have libusb-1.x])
@@ -781,8 +775,6 @@ AM_CONDITIONAL([BUILD_ESP_REMOTE], [test "x$build_esp_remote" = "xyes"])
 AM_CONDITIONAL([BUILD_ESP_COMPRESSION], [test "x$build_esp_compression" = "xyes"])
 
 AM_CONDITIONAL([USE_GCOV], [test "x$enable_gcov" = "xyes"])
-
-AM_CONDITIONAL([BUILD_CH347], [test "x$build_ch347" = "xyes"])
 
 AM_CONDITIONAL([BUILD_CH347], [test "x$build_ch347" = "xyes"])
 
