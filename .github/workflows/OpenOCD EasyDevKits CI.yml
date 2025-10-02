@@ -15,6 +15,11 @@ jobs:
     - uses: actions/checkout@v4
     - name: Install jimtcl
       run: |
+        mkdir -p $BUILD_DIR
+        export PREFIX="$(realpath $BUILD_DIR)/opt"
+        export DL_DIR="$(realpath $BUILD_DIR)/dl"
+        mkdir -p $PREFIX $DL_DIR
+
         # JIMTCL
         export JIMTCL_VER=jimtcl-0.83
         cd $DL_DIR && wget https://dl.espressif.com/dl/$JIMTCL_VER.tar.gz -O $JIMTCL_VER.tar.gz
