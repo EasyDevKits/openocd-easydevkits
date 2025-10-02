@@ -1,7 +1,0 @@
-[submodule "jimtcl"]
-	path = jimtcl
-	url = https://github.com/msteveb/jimtcl.git
-	ignore = untracked
-[submodule "src/jtag/drivers/libjaylink"]
-	path = src/jtag/drivers/libjaylink
-	url = https://gitlab.zapb.de/libjaylink/libjaylink.git
