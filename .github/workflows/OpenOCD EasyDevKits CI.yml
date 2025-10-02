@@ -18,7 +18,7 @@ jobs:
     - name: Bootstrap
       run: ./bootstrap
     - name: Configure
-      run: ./configure
+      run: ./configure --enable-internal-jimtcl
     - name: Make
       run: make
     - name: Create package
@@ -48,7 +48,7 @@ jobs:
     - name: Bootstrap
       run: ./bootstrap
     - name: Configure
-      run: ./configure
+      run: ./configure --enable-internal-jimtcl
     - name: Make
       run: make
     - name: Create package
